@@ -1,0 +1,13 @@
+{
+  "startUrl": "https://example.com",
+  "profileDir": "profiles/default",
+  "navigationTimeoutMs": 30000,
+  "actionTimeoutMs": 15000,
+  "flowName": "demo",
+  "screenshotOnError": true,
+  "proxy": {
+    "enabled": false,
+    "server": "",
+    "bypass": ""
+  }
+}

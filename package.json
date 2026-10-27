@@ -1,0 +1,27 @@
+{
+  "name": "tool-auto-chrome",
+  "version": "1.0.0",
+  "description": "Chrome Automation Tool using Playwright and TypeScript",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "tsx tests/config.test.ts && tsx tests/browser.test.ts && tsx tests/runner.test.ts",
+    "test:config": "tsx tests/config.test.ts",
+    "test:browser": "tsx tests/browser.test.ts",
+    "test:runner": "tsx tests/runner.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.50.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

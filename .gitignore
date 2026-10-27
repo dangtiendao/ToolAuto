@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Runtime and automation data
+profiles/
+logs/
+screenshots/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Sensitive configuration files
+config/config.json
+config/*.local.*
+config/secrets.*
+config/credentials.*
