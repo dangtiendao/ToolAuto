@@ -7,10 +7,11 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "tsx tests/config.test.ts && tsx tests/browser.test.ts && tsx tests/runner.test.ts",
+    "test": "tsx tests/config.test.ts && tsx tests/browser.test.ts && tsx tests/runner.test.ts && tsx tests/yopmail-muse.test.ts",
     "test:config": "tsx tests/config.test.ts",
     "test:browser": "tsx tests/browser.test.ts",
-    "test:runner": "tsx tests/runner.test.ts"
+    "test:runner": "tsx tests/runner.test.ts",
+    "test:flow": "tsx tests/yopmail-muse.test.ts"
   },
   "keywords": [],
   "author": "",

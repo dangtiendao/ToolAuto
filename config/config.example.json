@@ -1,6 +1,22 @@
 {
   "startUrl": "https://example.com",
-  "profileDir": "profiles/default",
+  "browser": {
+    "profileName": "Profile 1",
+    "profiles": {
+      "Profile 1": {
+        "userDataDir": "profiles/UserData",
+        "profileDirectory": "Profile 1"
+      },
+      "Default": {
+        "userDataDir": "profiles/UserData",
+        "profileDirectory": "Default"
+      },
+      "Profile 2": {
+        "userDataDir": "profiles/UserData",
+        "profileDirectory": "Profile 2"
+      }
+    }
+  },
   "navigationTimeoutMs": 30000,
   "actionTimeoutMs": 15000,
   "flowName": "demo",

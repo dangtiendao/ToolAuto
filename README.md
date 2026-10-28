@@ -6,7 +6,7 @@ Công cụ tự động hóa Google Chrome trên Windows sử dụng Node.js LTS
 
 ## 1. Cài đặt lần đầu
 
-Yêu cầu: Đã cài đặt **Google Chrome** và **Node.js LTS** (phiên bản 18+ hoặc 20+).
+Yêu cầu: Đã cài đặt **Google Chrome** tại `C:\Program Files\Google\Chrome\Application\chrome.exe` và **Node.js LTS** (phiên bản 18+ hoặc 20+).
 
 Mở PowerShell tại thư mục dự án và chạy:
 ```powershell
@@ -15,143 +15,93 @@ npm install
 
 ---
 
-## 2. Tạo cấu hình (Config)
+## 2. Cấu hình chọn Profile Chrome thực tế
 
-Tạo file cấu hình chính từ file mẫu:
-```powershell
-Copy-Item config/config.example.json config/config.json
+File cấu hình chính: `config/config.json`.
+
+```json
+{
+  "startUrl": "https://example.com",
+  "browser": {
+    "profileName": "Profile 1",
+    "cdpPort": 9222,
+    "profiles": {
+      "Profile 1": {
+        "profileDirectory": "Profile 1"
+      },
+      "Default": {
+        "profileDirectory": "Default"
+      },
+      "Profile 2": {
+        "profileDirectory": "Profile 2"
+      }
+    }
+  },
+  "navigationTimeoutMs": 30000,
+  "actionTimeoutMs": 15000,
+  "flowName": "yopmail-muse",
+  "screenshotOnError": true,
+  "proxy": {
+    "enabled": false,
+    "server": "",
+    "bypass": ""
+  }
+}
 ```
 
-Các thông số chính trong `config/config.json`:
-- `startUrl`: URL mở ban đầu (chỉ chấp nhận `http` hoặc `https`). Mặc định: `https://example.com`.
-- `profileDir`: Thư mục profile riêng (mặc định: `profiles/default`, tự động tạo nếu chưa có).
-- `navigationTimeoutMs`: Thời gian chờ tải trang (mili-giây, số nguyên dương). Mặc định: `30000`.
-- `actionTimeoutMs`: Thời gian chờ thao tác phần tử (mili-giây, số nguyên dương). Mặc định: `15000`.
-- `flowName`: Tên luồng cần chạy (ví dụ: `demo`).
-- `screenshotOnError`: Chụp ảnh màn hình khi có lỗi (`true`/`false`). Mặc định: `true`.
+### Các thông số quan trọng:
+- **`profileName`**: Tên profile bạn muốn tool sử dụng (ví dụ: `"Profile 1"`, `"Default"`, `"Profile 2"`...).
+- **`profiles`**: Danh sách khai báo các Profile trong Chrome của bạn. Mỗi profile chỉ cần chỉ định `"profileDirectory"` tương ứng với thư mục profile trong Chrome (ví dụ: `"Profile 1"`).
+- **Thư mục dữ liệu Chrome (`userDataDir`)**: Mặc định hệ thống tự động nhận diện thư mục dữ liệu Chrome của máy bạn tại:
+  `%LOCALAPPDATA%\Google\Chrome\User Data`
+  *(Bạn không cần khai báo lại đường dẫn này nếu dùng Chrome cá nhân thông thường).*
+- **`cdpPort`**: Cổng kết nối Chrome DevTools Protocol (mặc định: `9222`).
 
 ---
 
-## 3. Bật / Tắt Proxy
+## 3. Cách thức hoạt động với Google Chrome thật
 
-Trong `config/config.json`:
-- **Tắt proxy (Mặc định)**:
-  ```json
-  "proxy": {
-    "enabled": false
-  }
-  ```
-- **Bật proxy**:
-  ```json
-  "proxy": {
-    "enabled": true,
-    "server": "http://dia-chi-proxy:port",
-    "bypass": "localhost;*.internal"
-  }
-  ```
-  *(Chỉ hỗ trợ giao thức: `http://`, `https://`, `socks5://`. Không hỗ trợ `socks4://`).*
+Hệ thống kết nối trực tiếp vào Google Chrome thông qua giao thức **Remote Debugging Port (CDP)**:
 
-- **Cấu hình tài khoản proxy (Tùy chọn)**:
-  Tạo file `.env` từ mẫu:
-  ```powershell
-  Copy-Item .env.example .env
-  ```
-  Điền thông tin xác thực vào `.env` (tuyệt đối không điền vào `config.json`):
-  ```env
-  PROXY_USERNAME=tai_khoan
-  PROXY_PASSWORD=mat_khau
-  ```
-  > **Cam kết an toàn**: Nếu proxy lỗi kết nối, hệ thống sẽ báo lỗi và dừng, **tuyệt đối không tự ý chuyển sang kết nối trực tiếp**.
+1. **Khởi chạy tự động:**
+   - Khi bạn chạy tool (`run.bat` hoặc `npm start`), tool sẽ tự động khởi chạy Chrome từ:
+     `C:\Program Files\Google\Chrome\Application\chrome.exe`
+     kèm cờ `--remote-debugging-port=9222` và mở đúng Profile bạn đã chọn (ví dụ: `Profile 1`).
+   - Mọi tài khoản, cookie, lịch sử và extension trong Profile đó đều được giữ nguyên 100%.
+
+2. **Nếu Chrome đang mở sẵn trên máy:**
+   - Nếu Chrome đã được mở sẵn kèm cổng 9222, tool sẽ kết nối trực tiếp vào cửa sổ Chrome đó mà **không cần đóng các tab bạn đang làm việc**.
+   - Nếu Chrome đang mở bình thường (chưa bật cổng 9222), bạn có 2 cách:
+     - **Cách 1 (Nhanh nhất):** Đóng tất cả cửa sổ Chrome lại, sau đó chạy `npm start` (hoặc click `run.bat`). Tool sẽ tự mở Chrome kèm cổng 9222 và profile đã chọn.
+     - **Cách 2:** Khởi động Chrome bằng phím tắt / Command Prompt kèm cờ:
+       ```cmd
+       "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --profile-directory="Profile 1"
+       ```
+       *(Sau khi mở bằng lệnh này, bạn có thể chạy tool bất cứ lúc nào mà không cần khởi động lại Chrome).*
 
 ---
 
 ## 4. Cách chạy chương trình
 
 ### Cách 1: Khởi chạy nhanh bằng `run.bat`
-Nhấp đúp chuột vào file **`run.bat`** tại thư mục gốc dự án, hoặc chạy trong Command Prompt/PowerShell:
-```cmd
-run.bat
-```
-- Tự động kiểm tra Node.js và `node_modules`.
-- Tự động biên dịch TypeScript (`npm run build`) và khởi chạy (`npm start`).
-- Giữ cửa sổ khi gặp lỗi để dễ đọc thông báo.
+Nhấp đúp chuột vào file **`run.bat`** tại thư mục gốc dự án.
 
-### Cách 2: Khởi chạy bằng Terminal (PowerShell)
+### Cách 2: Khởi chạy bằng PowerShell / Terminal
 ```powershell
-# Chạy trực tiếp qua TypeScript (Development):
+# Chạy trực tiếp qua tsx:
 npm run dev
 
 # Hoặc biên dịch rồi chạy:
 npm run build
 npm start
 
-# Chạy toàn bộ các bài kiểm tra tự động (Test):
+# Chạy kiểm thử tự động toàn diện:
 npm test
 ```
 
-### Cách dừng chương trình
-- Sau khi luồng hoàn thành: Nhấn phím **Enter** trên terminal để đóng Chrome an toàn.
-- Dừng khẩn cấp khi đang chạy: Nhấn **Ctrl+C** (hệ thống sẽ hủy luồng, đóng Chrome, lưu kết quả `cancelled`, và thoát với mã `130`).
-
 ---
 
-## 5. Xem kết quả và nhật ký
+## 5. Các luồng nghiệp vụ có sẵn
 
-- **Nhật ký chạy**: Lưu tại `logs/<runId>.log` (ghi nhận timestamp, mức INFO/WARN/ERROR, tên luồng, tên bước và kết quả từng bước).
-- **Kết quả có cấu trúc**: Lưu tại `logs/<runId>.result.json` (`status: "success" | "failed" | "cancelled"`, thời gian, danh sách bước hoàn thành, thông tin lỗi).
-- **Ảnh chụp khi lỗi**: Lưu tại `screenshots/<runId>/error_<stepId>_<timestamp>.png` (Lưu ý: Ảnh chụp màn hình có thể chứa dữ liệu nhạy cảm hiển thị trên trang).
-
----
-
-## 6. Thêm luồng tự động hóa mới
-
-1. **Tạo file luồng**: Trong thư mục `src/flows/`, tạo file ví dụ `src/flows/my-flow.flow.ts`:
-   ```typescript
-   import { Flow } from '../runner/types';
-
-   export const myFlow: Flow = {
-     name: 'my-flow',
-     description: 'Mô tả luồng của bạn',
-     steps: [
-       {
-         id: 'step-1',
-         name: 'Mô tả bước 1',
-         execute: async (context) => {
-           // Thao tác với context.page
-         },
-         verify: async (context) => true // Điều kiện xác nhận (tùy chọn)
-       }
-     ]
-   };
-   ```
-2. **Đăng ký vào Registry**: Trong `src/flows/index.ts`, thêm:
-   ```typescript
-   import { myFlow } from './my-flow.flow';
-   registerFlow(myFlow);
-   ```
-3. **Cấu hình để chạy**: Trong `config/config.json`, đổi `"flowName": "my-flow"`.
-
----
-
-## Cấu trúc thư mục
-
-```text
-├── config/             # Cấu hình mẫu và cấu hình thực tế
-├── logs/               # File nhật ký .log và kết quả .result.json (được git bỏ qua)
-├── screenshots/        # Ảnh chụp khi gặp lỗi (được git bỏ qua)
-├── profiles/           # Profile riêng của Chrome (được git bỏ qua)
-├── src/
-│   ├── browser/        # Quản lý Chrome, cấu hình proxy, đóng context an toàn
-│   ├── config/         # Đọc, kiểm tra tính hợp lệ và chuẩn hóa cấu hình
-│   ├── flows/          # Các kịch bản tự động hóa và Flow Registry
-│   ├── runner/         # Bộ điều phối thực thi tuần tự các bước
-│   ├── utils/          # Logger, Run ID, lọc thông tin nhạy cảm (Sanitizer)
-│   └── index.ts        # Điểm khởi chạy chính của ứng dụng
-├── tests/              # Bộ kiểm tra tự động toàn diện
-├── .env.example        # Mẫu biến môi trường xác thực proxy
-├── .gitignore          # Cấu hình bỏ qua tệp nhạy cảm và dữ liệu chạy
-├── package.json        # Dependencies và scripts
-├── run.bat             # File khởi chạy nhanh trên Windows
-├── tsconfig.json       # Cấu hình TypeScript compiler
-└── README.md           # Hướng dẫn sử dụng
-```
+1. **`demo`**: Mở trang `startUrl`, kiểm tra DOM, ghi nhận tiêu đề và URL.
+2. **`yopmail-muse`**: Luồng tuần tự tự động hóa trên 2 tab (TabA mở YOPmail tạo hộp thư ngẫu nhiên 10-14 ký tự, TabB mở Muse.ai gửi email, TabA lấy OTP, TabB nhập OTP và xác nhận).

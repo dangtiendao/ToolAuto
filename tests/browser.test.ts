@@ -1,11 +1,18 @@
 import * as assert from 'assert';
 import * as path from 'path';
 import * as fs from 'fs';
-import { buildPlaywrightProxy, handleLaunchError, launchBrowser, closeBrowser } from '../src/browser';
+import {
+  buildPlaywrightProxy,
+  handleLaunchError,
+  launchBrowser,
+  closeBrowser,
+  confirmProfileCreation,
+  isCdpAvailable
+} from '../src/browser';
 import { AppConfig } from '../src/config/types';
 
 async function runTests(): Promise<void> {
-  console.log('--- BẮT ĐẦU KIỂM TRA MODULE BROWSER & PROXY ---\n');
+  console.log('--- BẮT ĐẦU KIỂM TRA MODULE BROWSER & PROFILE (CDP & PERSISTENT) ---\n');
 
   // ==========================================
   // Test 1: Thẩm định và tạo cấu hình Proxy cho Playwright
@@ -67,12 +74,21 @@ async function runTests(): Promise<void> {
   // ==========================================
   console.log('\n2. Kiểm tra handleLaunchError:');
 
+  const dummyUserDataDir = path.resolve(__dirname, '../profiles/dummy_user_data');
   const dummyConfig: AppConfig = {
     startUrl: 'https://example.com',
-    profileDir: path.resolve(__dirname, '../profiles/dummy'),
+    profileDir: path.join(dummyUserDataDir, 'Default'),
+    selectedProfile: {
+      profileName: 'ToolMain',
+      userDataDir: dummyUserDataDir,
+      profileDirectory: 'Default',
+      fullPath: path.join(dummyUserDataDir, 'Default'),
+      cdpPort: 9222
+    },
     navigationTimeoutMs: 10000,
     actionTimeoutMs: 5000,
     flowName: 'demo',
+    screenshotOnError: true,
     proxy: { enabled: false }
   };
 
@@ -83,8 +99,19 @@ async function runTests(): Promise<void> {
     );
     const friendlyErr = handleLaunchError(rawLockError, dummyConfig);
     assert.ok(friendlyErr.message.includes('[LỖI PROFILE]'), 'Phải gắn cờ lỗi profile');
-    assert.ok(friendlyErr.message.includes('không tự động kill'), 'Phải nhấn mạnh không tự kill tiến trình');
-    console.log('  ✔ Xử lý thông báo lỗi profile bị chiếm dụng chính xác.');
+    assert.ok(
+      friendlyErr.message.includes(dummyUserDataDir),
+      'Phải hiển thị rõ thư mục gốc userDataDir đang bị khóa'
+    );
+    assert.ok(
+      friendlyErr.message.includes('ToolMain'),
+      'Phải hiển thị tên định danh profileName'
+    );
+    assert.ok(
+      friendlyErr.message.includes('tuyệt đối không tự động kill các tiến trình Chrome khác'),
+      'Phải cam kết không tự kill tiến trình'
+    );
+    console.log('  ✔ Xử lý thông báo lỗi profile bị chiếm dụng chính xác với đầy đủ thông tin an toàn.');
   }
 
   // 2.2: Chrome chưa được cài đặt
@@ -112,17 +139,90 @@ async function runTests(): Promise<void> {
   }
 
   // ==========================================
-  // Test 3: Thử nghiệm không tự động chuyển kết nối trực tiếp khi Proxy lỗi
+  // Test 3: Xử lý Profile chưa tồn tại (Yêu cầu xác nhận, không âm thầm tạo mới)
   // ==========================================
-  console.log('\n3. Kiểm tra không tự fallback khi proxy chết:');
+  console.log('\n3. Kiểm tra xử lý profile chưa tồn tại:');
   {
-    const testProfile = path.resolve(__dirname, '../profiles/test_unreachable_proxy');
+    const uncreatedUserDataDir = path.resolve(__dirname, '../profiles/test_uncreated_data');
+    const uncreatedFullPath = path.join(uncreatedUserDataDir, 'NewProfile');
+
+    if (fs.existsSync(uncreatedUserDataDir)) {
+      fs.rmSync(uncreatedUserDataDir, { recursive: true, force: true });
+    }
+
+    const uncreatedProfileConfig: AppConfig = {
+      startUrl: 'https://example.com',
+      profileDir: uncreatedFullPath,
+      selectedProfile: {
+        profileName: 'UncreatedProfile',
+        userDataDir: uncreatedUserDataDir,
+        profileDirectory: 'NewProfile',
+        fullPath: uncreatedFullPath,
+        cdpPort: 58888
+      },
+      navigationTimeoutMs: 5000,
+      actionTimeoutMs: 5000,
+      flowName: 'demo',
+      screenshotOnError: false,
+      proxy: { enabled: false }
+    };
+
+    let launchFailed = false;
+    try {
+      await launchBrowser(uncreatedProfileConfig, { autoConfirmNewProfile: false, fallbackToPersistentContext: true });
+    } catch (err: unknown) {
+      launchFailed = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI PROFILE CHƯA TỒN TẠI]'), 'Phải báo lỗi profile chưa tồn tại');
+      assert.ok(msg.includes('UncreatedProfile'), 'Phải nêu rõ tên profile');
+    }
+
+    assert.strictEqual(launchFailed, true, 'Khởi chạy khi chưa xác nhận phải thất bại');
+    assert.strictEqual(
+      fs.existsSync(uncreatedFullPath),
+      false,
+      'Thư mục profile tuyệt đối không được tự ý tạo khi chưa xác nhận'
+    );
+    console.log('  ✔ Dừng an toàn và không âm thầm tạo profile mới khi chưa có xác nhận.');
+
+    const rejectedConfirm = await confirmProfileCreation('TestProfile', uncreatedFullPath, {
+      confirmNewProfileHandler: async () => false
+    });
+    assert.strictEqual(rejectedConfirm, false);
+
+    const approvedConfirm = await confirmProfileCreation('TestProfile', uncreatedFullPath, {
+      confirmNewProfileHandler: async () => true
+    });
+    assert.strictEqual(approvedConfirm, true);
+    console.log('  ✔ Cơ chế confirmProfileCreation hoạt động chính xác.');
+  }
+
+  // ==========================================
+  // Test 4: Thử nghiệm không tự động chuyển kết nối trực tiếp khi Proxy lỗi
+  // ==========================================
+  console.log('\n4. Kiểm tra không tự fallback khi proxy chết:');
+  {
+    const unreachableUserDataDir = path.resolve(__dirname, '../profiles/test_unreachable_data');
+    const unreachableFullPath = path.join(unreachableUserDataDir, 'Default');
+
+    if (!fs.existsSync(unreachableFullPath)) {
+      fs.mkdirSync(unreachableFullPath, { recursive: true });
+    }
+
     const unreachableProxyConfig: AppConfig = {
       startUrl: 'https://example.com',
-      profileDir: testProfile,
+      profileDir: unreachableFullPath,
+      selectedProfile: {
+        profileName: 'UnreachableProxyProfile',
+        userDataDir: unreachableUserDataDir,
+        profileDirectory: 'Default',
+        fullPath: unreachableFullPath,
+        cdpPort: 58889
+      },
       navigationTimeoutMs: 5000,
       actionTimeoutMs: 5000,
       flowName: 'test',
+      screenshotOnError: false,
       proxy: {
         enabled: true,
         server: 'http://127.0.0.1:59999' // Cổng không có service nào lắng nghe
@@ -131,7 +231,7 @@ async function runTests(): Promise<void> {
 
     let launchFailed = false;
     try {
-      const session = await launchBrowser(unreachableProxyConfig);
+      const session = await launchBrowser(unreachableProxyConfig, { fallbackToPersistentContext: true });
       await closeBrowser(session.context);
     } catch (err: unknown) {
       launchFailed = true;
@@ -143,16 +243,104 @@ async function runTests(): Promise<void> {
     assert.strictEqual(launchFailed, true, 'Khởi chạy qua proxy chết phải thất bại, không được âm thầm kết nối trực tiếp');
     console.log('  ✔ Đảm bảo trình duyệt từ chối kết nối trực tiếp khi proxy lỗi.');
 
-    // Dọn dẹp thư mục test profile nếu có
-    if (fs.existsSync(testProfile)) {
-      fs.rmSync(testProfile, { recursive: true, force: true });
+    if (fs.existsSync(unreachableUserDataDir)) {
+      try {
+        fs.rmSync(unreachableUserDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+      } catch {}
     }
+  }
+
+  // ==========================================
+  // Test 5: Tái sử dụng profile và bảo toàn dữ liệu (Persistence Verification)
+  // ==========================================
+  console.log('\n5. Kiểm tra mở lại cùng profile và bảo toàn dữ liệu:');
+  {
+    const persistenceUserDataDir = path.resolve(__dirname, '../profiles/test_persistence_data');
+    const persistenceProfileDirName = 'Default';
+    const persistenceFullPath = path.join(persistenceUserDataDir, persistenceProfileDirName);
+
+    if (fs.existsSync(persistenceUserDataDir)) {
+      try {
+        fs.rmSync(persistenceUserDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+      } catch {}
+    }
+
+    const persistenceConfig: AppConfig = {
+      startUrl: 'https://example.com',
+      profileDir: persistenceFullPath,
+      selectedProfile: {
+        profileName: 'PersistenceTestProfile',
+        userDataDir: persistenceUserDataDir,
+        profileDirectory: persistenceProfileDirName,
+        fullPath: persistenceFullPath,
+        cdpPort: 58890
+      },
+      navigationTimeoutMs: 15000,
+      actionTimeoutMs: 10000,
+      flowName: 'demo',
+      screenshotOnError: false,
+      proxy: { enabled: false }
+    };
+
+    console.log('  -> Khởi chạy Phiên 1 để ghi dữ liệu lưu trữ...');
+    const session1 = await launchBrowser(persistenceConfig, {
+      autoConfirmNewProfile: true,
+      fallbackToPersistentContext: true
+    });
+    assert.strictEqual(fs.existsSync(persistenceFullPath), true, 'Thư mục profile phải được tạo');
+
+    await session1.page.evaluate(() => {
+      localStorage.setItem('persistence_test_key', 'tool_auto_value_98765');
+    });
+
+    await closeBrowser(session1);
+    console.log('  -> Đã đóng Phiên 1 an toàn.');
+
+    console.log('  -> Khởi chạy Phiên 2 trên cùng profile để kiểm tra dữ liệu được giữ lại...');
+    const session2 = await launchBrowser(persistenceConfig, {
+      fallbackToPersistentContext: true
+    });
+
+    const retrievedValue = await session2.page.evaluate(() => {
+      return localStorage.getItem('persistence_test_key');
+    });
+
+    assert.strictEqual(
+      retrievedValue,
+      'tool_auto_value_98765',
+      'Dữ liệu localStorage phải được bảo toàn nguyên vẹn giữa các phiên khi dùng cùng profile'
+    );
+
+    await closeBrowser(session2);
+    console.log('  -> Đã đóng Phiên 2 an toàn.');
+
+    if (fs.existsSync(persistenceUserDataDir)) {
+      try {
+        fs.rmSync(persistenceUserDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+      } catch {}
+    }
+
+    console.log('  ✔ Tái sử dụng profile và bảo toàn dữ liệu thử nghiệm thành công 100%.');
+  }
+
+  // ==========================================
+  // Test 6: Kiểm tra hàm isCdpAvailable
+  // ==========================================
+  console.log('\n6. Kiểm tra hàm isCdpAvailable:');
+  {
+    const notAvailable = await isCdpAvailable(59998);
+    assert.strictEqual(notAvailable, false, 'Cổng không mở phải trả về false');
+    console.log('  ✔ isCdpAvailable kiểm tra chính xác trạng thái cổng.');
   }
 
   console.log('\n--- TẤT CẢ BÀI KIỂM TRA BROWSER ĐÃ VƯỢT QUA! ---');
 }
 
-runTests().catch((err) => {
-  console.error('Lỗi khi chạy kiểm tra browser:', err);
-  process.exit(1);
-});
+runTests()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('Lỗi khi chạy kiểm tra browser:', err);
+    process.exit(1);
+  });
