@@ -29,6 +29,7 @@ export interface RawConfig {
   proxy?: RawProxyConfig;
   phoneNumbersFile?: unknown;
   phoneMode?: unknown;
+  incognito?: unknown;
 }
 
 export interface ProxyConfig {
@@ -73,6 +74,7 @@ export interface AppConfig {
   proxy: ProxyConfig;
   phoneNumbersFile?: string;
   phoneMode: 'mock' | 'live';
+  incognito?: boolean;
 }
 
 export interface ValidationResult {

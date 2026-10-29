@@ -89,7 +89,7 @@ export class BrowserManager {
   }
 
   /**
-   * Khởi chạy Google Chrome theo Persistent Context ban đầu.
+   * Khởi chạy Google Chrome theo cấu hình đã chọn (Incognito hoặc Persistent Context).
    */
   public async initSession(): Promise<BrowserSession> {
     if (this.session && this.session.page && !this.session.page.isClosed()) {
@@ -97,7 +97,7 @@ export class BrowserManager {
     }
 
     const mode = this.currentMode;
-    this.session = await this.launchPersistentSession(mode);
+    this.session = await this.launchSession(mode);
     this.activePages.set('default', this.session.page);
     return this.session;
   }
@@ -185,15 +185,17 @@ export class BrowserManager {
     // Chờ hệ điều hành Windows giải phóng file khóa SingletonLock của Chrome
     await new Promise((resolve) => setTimeout(resolve, 800));
 
-    // 6. Mở persistent context mới
+    // 6. Mở session mới (persistent hoặc incognito)
     this.logger?.info(
-      `Đang mở lại Chrome ở chế độ "${targetMode}" cùng thư mục userDataDir và profileDirectory...`,
+      this.config.incognito
+        ? `Đang mở lại Chrome ở chế độ ẩn danh (incognito) với kết nối "${targetMode}"...`
+        : `Đang mở lại Chrome ở chế độ "${targetMode}" cùng thư mục userDataDir và profileDirectory...`,
       { flow: this.config.flowName }
     );
 
     let newSession: BrowserSession;
     try {
-      newSession = await this.launchPersistentSession(targetMode);
+      newSession = await this.launchSession(targetMode);
     } catch (launchErr) {
       this.isSwitching = false;
       // Dừng luồng, KHÔNG tự fallback sang direct, KHÔNG đánh dấu chế độ đích đã sẵn sàng
@@ -327,6 +329,73 @@ export class BrowserManager {
   }
 
   /**
+   * Khởi chạy phiên trình duyệt dựa trên cấu hình: Ẩn danh (Incognito) hoặc Persistent Context.
+   */
+  private async launchSession(mode: ConnectionMode): Promise<BrowserSession> {
+    if (this.config.incognito) {
+      return this.launchIncognitoSession(mode);
+    }
+    return this.launchPersistentSession(mode);
+  }
+
+  /**
+   * Khởi chạy phiên Chrome ẩn danh (Incognito).
+   * Không ghi dữ liệu/cookie lên ổ đĩa, độc lập hoàn toàn, tránh xung đột SingletonLock.
+   */
+  private async launchIncognitoSession(mode: ConnectionMode): Promise<BrowserSession> {
+    const chromeExe = getChromeExecutablePath() || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    const launchArgs = ['--incognito'];
+
+    if (mode === 'direct') {
+      launchArgs.push('--no-proxy-server');
+    }
+
+    const proxyOption = mode === 'proxy' && this.config.proxy?.server ? buildPlaywrightProxy(this.config.proxy) : undefined;
+
+    const launchOptions: Parameters<typeof chromium.launch>[0] = {
+      channel: 'chrome',
+      executablePath: chromeExe,
+      headless: false,
+      args: launchArgs,
+      proxy: proxyOption
+    };
+
+    let browser;
+    try {
+      browser = await chromium.launch(launchOptions);
+    } catch (err) {
+      throw handleLaunchError(err, this.config);
+    }
+
+    let context;
+    try {
+      context = await browser.newContext({
+        viewport: null,
+        proxy: proxyOption
+      });
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw handleLaunchError(err, this.config);
+    }
+
+    context.setDefaultTimeout(this.config.actionTimeoutMs);
+    context.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+
+    const page = await context.newPage();
+    page.setDefaultTimeout(this.config.actionTimeoutMs);
+    page.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+
+    return {
+      browser,
+      context,
+      page,
+      executablePath: chromeExe,
+      isCdp: false,
+      isIncognito: true
+    };
+  }
+
+  /**
    * Khởi chạy persistent context của Chrome với cấu hình rõ ràng cho từng chế độ.
    */
   private async launchPersistentSession(mode: ConnectionMode): Promise<BrowserSession> {
@@ -375,7 +444,8 @@ export class BrowserManager {
       context,
       page,
       executablePath: chromeExe,
-      isCdp: false
+      isCdp: false,
+      isIncognito: false
     };
   }
 }

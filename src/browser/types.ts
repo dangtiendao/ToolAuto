@@ -6,6 +6,7 @@ export interface BrowserSession {
   browser?: Browser;
   executablePath?: string;
   isCdp?: boolean;
+  isIncognito?: boolean;
 }
 
 export interface PlaywrightProxyOptions {

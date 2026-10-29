@@ -86,8 +86,12 @@ async function main(): Promise<void> {
     logger.info(`Đang khởi chạy Google Chrome...`);
     session = await browserManager.initSession();
     logger.info(`Đã khởi chạy Chrome chính thức từ: ${session.executablePath || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'}`);
-    logger.info(`Đường dẫn thư mục dữ liệu gốc (userDataDir): ${config.selectedProfile.userDataDir}`);
-    logger.info(`Đường dẫn profile đầy đủ (Profile Path): ${config.selectedProfile.fullPath}`);
+    if (config.incognito) {
+      logger.info(`Chế độ trình duyệt: ẨN DANH (Incognito) - Tab ẩn danh không lưu session/profile.`);
+    } else {
+      logger.info(`Đường dẫn thư mục dữ liệu gốc (userDataDir): ${config.selectedProfile.userDataDir}`);
+      logger.info(`Đường dẫn profile đầy đủ (Profile Path): ${config.selectedProfile.fullPath}`);
+    }
     logger.info(`Đã mở URL ban đầu: ${sanitizeUrl(config.startUrl)}`);
     logger.info(
       '(Lưu ý: Mở trang thành công xác nhận kết nối mạng/proxy tới URL ban đầu hoạt động, không phải là xác minh IP đầu ra).'

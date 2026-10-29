@@ -163,7 +163,7 @@ export async function closeBrowser(
       if (contextOrSession.page && !contextOrSession.page.isClosed()) {
         await contextOrSession.page.close().catch(() => {});
       }
-      if (contextOrSession.isCdp && contextOrSession.browser) {
+      if (contextOrSession.browser) {
         await contextOrSession.browser.close().catch(() => {});
       } else if (contextOrSession.context) {
         await contextOrSession.context.close().catch(() => {});

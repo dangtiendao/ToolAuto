@@ -461,4 +461,51 @@ console.log('\n11. Kiểm tra cấu hình phoneMode và phoneNumbersFile:');
   console.log('  ✔ Kiểm tra phoneMode, phoneNumbersFile và formatSafeConfig thành công.');
 }
 
+// ==========================================
+// Test 12: Kiểm tra cấu hình incognito
+// ==========================================
+console.log('\n12. Kiểm tra cấu hình incognito:');
+{
+  // 12.1: Mặc định incognito là false
+  const defaultIncognito = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t' },
+    projectRoot
+  );
+  assert.strictEqual(defaultIncognito.valid, true);
+  assert.strictEqual(defaultIncognito.config?.incognito, false, 'Mặc định incognito phải là false');
+
+  // 12.2: Bật incognito: true
+  const incognitoOn = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t', incognito: true },
+    projectRoot
+  );
+  assert.strictEqual(incognitoOn.valid, true);
+  assert.strictEqual(incognitoOn.config?.incognito, true);
+
+  // 12.3: Bật incognito: true không cần cấu hình profile
+  const incognitoNoProfile = validateConfig(
+    { startUrl: 'https://example.com', incognito: true },
+    projectRoot
+  );
+  assert.strictEqual(incognitoNoProfile.valid, true);
+  assert.strictEqual(incognitoNoProfile.config?.incognito, true);
+  assert.strictEqual(incognitoNoProfile.config?.selectedProfile.profileName, 'Incognito');
+
+  // 12.4: incognito không phải boolean
+  const invalidIncognito = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t', incognito: 'yes' },
+    projectRoot
+  );
+  assert.strictEqual(invalidIncognito.valid, false);
+  assert.ok(invalidIncognito.errors.some((e) => e.includes('"incognito" phải là giá trị boolean')));
+
+  // 12.5: formatSafeConfig có incognito
+  if (incognitoOn.config) {
+    const safe = formatSafeConfig(incognitoOn.config);
+    assert.strictEqual(safe.incognito, true);
+  }
+
+  console.log('  ✔ Kiểm tra cấu hình incognito và formatSafeConfig thành công.');
+}
+
 console.log('\n--- TẤT CẢ CÁC BÀI KIỂM TRA CẤU HÌNH ĐÃ VƯỢT QUA THÀNH CÔNG! ---');

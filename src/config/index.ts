@@ -112,6 +112,11 @@ export function validateConfig(
   }
 
   // 2. Kiểm tra xung đột cấu hình profile (profileDir cũ vs browser mới)
+  const incognito = rawConfig.incognito === true;
+  if (rawConfig.incognito !== undefined && rawConfig.incognito !== null && typeof rawConfig.incognito !== 'boolean') {
+    errors.push(`"incognito" phải là giá trị boolean (true hoặc false). Nhận được: ${typeof rawConfig.incognito}`);
+  }
+
   const hasLegacyProfileDir =
     typeof rawConfig.profileDir === 'string' && rawConfig.profileDir.trim().length > 0;
   const hasNewBrowserConfig =
@@ -268,6 +273,15 @@ export function validateConfig(
       fullPath: resolvedPath,
       cdpPort: 9222
     };
+  } else if (incognito) {
+    selectedProfile = {
+      profileName: 'Incognito',
+      userDataDir: '',
+      profileDirectory: 'Incognito',
+      fullPath: '',
+      cdpPort: 9222
+    };
+    profileDir = '';
   } else {
     errors.push(
       'Cấu hình thiếu thông tin profile: Vui lòng định nghĩa khối "browser" với "profileName" và "profiles".'
@@ -437,7 +451,8 @@ export function validateConfig(
       proxyCheckUrl,
       proxy: proxyConfig,
       phoneNumbersFile,
-      phoneMode
+      phoneMode,
+      incognito
     }
   };
 }
@@ -546,7 +561,8 @@ export function formatSafeConfig(config: AppConfig): Record<string, unknown> {
           username: config.proxy.username ? '***' : undefined
         },
     phoneMode: config.phoneMode,
-    phoneNumbersFile: config.phoneNumbersFile
+    phoneNumbersFile: config.phoneNumbersFile,
+    incognito: Boolean(config.incognito)
   };
 }
 

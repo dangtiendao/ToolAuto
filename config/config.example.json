@@ -1,5 +1,6 @@
 {
   "startUrl": "https://example.com",
+  "incognito": false,
   "browser": {
     "profileName": "Profile 1",
     "profiles": {

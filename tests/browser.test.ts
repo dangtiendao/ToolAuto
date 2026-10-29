@@ -7,7 +7,8 @@ import {
   launchBrowser,
   closeBrowser,
   confirmProfileCreation,
-  isCdpAvailable
+  isCdpAvailable,
+  BrowserManager
 } from '../src/browser';
 import { AppConfig } from '../src/config/types';
 
@@ -331,6 +332,50 @@ async function runTests(): Promise<void> {
     const notAvailable = await isCdpAvailable(59998);
     assert.strictEqual(notAvailable, false, 'Cổng không mở phải trả về false');
     console.log('  ✔ isCdpAvailable kiểm tra chính xác trạng thái cổng.');
+  }
+
+  // ==========================================
+  // Test 7: Kiểm tra BrowserManager với chế độ Incognito
+  // ==========================================
+  console.log('\n7. Kiểm tra BrowserManager với chế độ Incognito:');
+  {
+    const incognitoConfig: AppConfig = {
+      startUrl: 'https://example.com',
+      profileDir: '',
+      selectedProfile: {
+        profileName: 'Incognito',
+        userDataDir: '',
+        profileDirectory: 'Incognito',
+        fullPath: '',
+        cdpPort: 9222
+      },
+      navigationTimeoutMs: 15000,
+      actionTimeoutMs: 10000,
+      flowName: 'test-incognito',
+      screenshotOnError: false,
+      initialConnectionMode: 'direct',
+      proxy: { enabled: false },
+      phoneMode: 'mock',
+      incognito: true
+    };
+
+    const manager = new BrowserManager(incognitoConfig);
+    assert.strictEqual(manager.getConnectionMode(), 'direct');
+    const session = await manager.initSession();
+    assert.strictEqual(session.isIncognito, true, 'Phiên khởi chạy phải có cờ isIncognito = true');
+    assert.ok(session.browser, 'Phiên incognito phải có browser instance');
+    assert.ok(session.page, 'Phiên incognito phải có page instance');
+    const initialPage = session.page;
+    assert.strictEqual(initialPage.isClosed(), false);
+
+    const page2 = await manager.newPage('tab_incognito_2');
+    assert.strictEqual(page2.isClosed(), false);
+    assert.notStrictEqual(page2, initialPage, 'Tab mới phải khác với tab ban đầu');
+
+    await manager.close();
+    assert.strictEqual(initialPage.isClosed(), true, 'Initial page phải được đóng sau khi manager.close()');
+    assert.strictEqual(page2.isClosed(), true, 'Tab mới phải được đóng sau khi manager.close()');
+    console.log('  ✔ Khởi chạy phiên Incognito, mở tab mới và đóng an toàn thành công.');
   }
 
   console.log('\n--- TẤT CẢ BÀI KIỂM TRA BROWSER ĐÃ VƯỢT QUA! ---');

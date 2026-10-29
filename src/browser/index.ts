@@ -35,6 +35,50 @@ export async function launchBrowser(
     config.initialConnectionMode ||
     (config.proxy.enabled ? 'proxy' : 'direct');
 
+  // Khởi chạy chế độ Incognito nếu cấu hình incognito = true
+  if (config.incognito) {
+    const launchArgs = ['--incognito'];
+    if (effectiveMode === 'direct') {
+      launchArgs.push('--no-proxy-server');
+    }
+    const proxyOption = effectiveMode === 'proxy' && config.proxy.server ? buildPlaywrightProxy(config.proxy) : undefined;
+    const launchOptions: Parameters<typeof chromium.launch>[0] = {
+      channel: 'chrome',
+      executablePath: chromeExe,
+      headless: false,
+      args: launchArgs,
+      proxy: proxyOption
+    };
+    let browser: Browser;
+    try {
+      browser = await chromium.launch(launchOptions);
+    } catch (err) {
+      throw handleLaunchError(err, config);
+    }
+    let context: BrowserContext;
+    try {
+      context = await browser.newContext({ viewport: null, proxy: proxyOption });
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw handleLaunchError(err, config);
+    }
+    context.setDefaultTimeout(config.actionTimeoutMs);
+    context.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    const page = await context.newPage();
+    page.setDefaultTimeout(config.actionTimeoutMs);
+    page.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    try {
+      await page.goto(config.startUrl, {
+        timeout: config.navigationTimeoutMs,
+        waitUntil: 'domcontentloaded'
+      });
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw err;
+    }
+    return { browser, context, page, executablePath: chromeExe, isCdp: false, isIncognito: true };
+  }
+
   // 1. Kiểm tra xem cổng CDP đã được mở sẵn hay chưa
   let cdpReady = await isCdpAvailable(cdpPort);
 
