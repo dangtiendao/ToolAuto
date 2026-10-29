@@ -1,6 +1,7 @@
 import { Page } from 'playwright';
 import { AppConfig } from '../config/types';
 import { Logger } from '../utils/logger';
+import type { BrowserManager } from '../browser/manager';
 
 export interface CancellationToken {
   readonly isCancelled: boolean;
@@ -13,6 +14,7 @@ export interface FlowContext {
   logger: Logger;
   cancellationToken?: AbortSignal | CancellationToken;
   data?: Record<string, unknown>;
+  browserManager?: BrowserManager;
 }
 
 export interface Step {

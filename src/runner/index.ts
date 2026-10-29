@@ -48,6 +48,15 @@ async function captureErrorScreenshot(
     return undefined;
   }
 
+  // Đồng bộ lại Page từ BrowserManager nếu có
+  if (context.browserManager) {
+    try {
+      context.page = context.browserManager.getCurrentPage();
+    } catch {
+      // Giữ nguyên page hiện tại
+    }
+  }
+
   if (!context.page || typeof context.page.isClosed !== 'function' || context.page.isClosed()) {
     context.logger.warn(
       'Không thể chụp ảnh màn hình lỗi vì trang (page) không khả dụng hoặc đã bị đóng.',
@@ -133,9 +142,27 @@ export async function runFlow(
 
     logger.info(`Bắt đầu thực thi bước: "${step.name}"`, stepCtx);
 
+    // Đồng bộ Page hiện tại từ BrowserManager nếu có (đảm bảo không dùng Page cũ sau restart)
+    if (context.browserManager) {
+      try {
+        context.page = context.browserManager.getCurrentPage();
+      } catch {
+        // Nếu trang chưa mở hoặc đang chuyển chế độ, giữ nguyên
+      }
+    }
+
     try {
       // 2. Thực thi bước
       await step.execute(context);
+
+      // Cập nhật lại context.page sau khi thực thi bước (nếu bước vừa tạo tab mới hoặc chuyển proxy)
+      if (context.browserManager) {
+        try {
+          context.page = context.browserManager.getCurrentPage();
+        } catch {
+          // Bỏ qua
+        }
+      }
 
       // 3. Kiểm tra điều kiện xác nhận nếu có
       if (step.verify) {

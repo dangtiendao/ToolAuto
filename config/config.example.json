@@ -19,11 +19,15 @@
   },
   "navigationTimeoutMs": 30000,
   "actionTimeoutMs": 15000,
-  "flowName": "demo",
+  "flowName": "proxy-switch-demo",
   "screenshotOnError": true,
+  "initialConnectionMode": "direct",
+  "proxyCheckUrl": "https://httpbin.org/ip",
   "proxy": {
     "enabled": false,
     "server": "",
     "bypass": ""
-  }
+  },
+  "phoneNumbersFile": "phone-numbers.example.txt",
+  "phoneMode": "mock"
 }

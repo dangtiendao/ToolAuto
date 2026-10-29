@@ -24,7 +24,11 @@ export interface RawConfig {
   actionTimeoutMs?: unknown;
   flowName?: unknown;
   screenshotOnError?: unknown;
+  initialConnectionMode?: unknown;
+  proxyCheckUrl?: unknown;
   proxy?: RawProxyConfig;
+  phoneNumbersFile?: unknown;
+  phoneMode?: unknown;
 }
 
 export interface ProxyConfig {
@@ -64,7 +68,11 @@ export interface AppConfig {
   actionTimeoutMs: number;
   flowName: string;
   screenshotOnError: boolean;
+  initialConnectionMode: 'direct' | 'proxy';
+  proxyCheckUrl?: string;
   proxy: ProxyConfig;
+  phoneNumbersFile?: string;
+  phoneMode: 'mock' | 'live';
 }
 
 export interface ValidationResult {

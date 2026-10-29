@@ -307,28 +307,111 @@ export function validateConfig(
   // 7. Kiểm tra screenshotOnError (mặc định là true)
   const screenshotOnError = rawConfig.screenshotOnError !== false;
 
-  // 8. Kiểm tra Proxy
+  // 8. Kiểm tra initialConnectionMode và proxyCheckUrl
+  let initialConnectionMode: 'direct' | 'proxy';
+  if (rawConfig.initialConnectionMode !== undefined && rawConfig.initialConnectionMode !== null) {
+    if (rawConfig.initialConnectionMode !== 'direct' && rawConfig.initialConnectionMode !== 'proxy') {
+      errors.push(
+        `"initialConnectionMode" không hợp lệ: "${rawConfig.initialConnectionMode}". Giá trị hợp lệ là "direct" hoặc "proxy".`
+      );
+      initialConnectionMode = 'direct';
+    } else {
+      initialConnectionMode = rawConfig.initialConnectionMode;
+    }
+  } else {
+    // Mặc định: nếu cấu hình proxy.enabled = true thì khởi đầu bằng proxy, ngược lại là direct
+    initialConnectionMode = rawConfig.proxy?.enabled === true ? 'proxy' : 'direct';
+  }
+
+  let proxyCheckUrl: string | undefined;
+  if (rawConfig.proxyCheckUrl !== undefined && rawConfig.proxyCheckUrl !== null) {
+    if (typeof rawConfig.proxyCheckUrl !== 'string' || !rawConfig.proxyCheckUrl.trim()) {
+      errors.push('"proxyCheckUrl" không được để trống nếu được chỉ định.');
+    } else {
+      try {
+        const parsedCheckUrl = new URL(rawConfig.proxyCheckUrl.trim());
+        if (parsedCheckUrl.protocol !== 'http:' && parsedCheckUrl.protocol !== 'https:') {
+          errors.push(
+            `"proxyCheckUrl" phải sử dụng giao thức http hoặc https (hiện tại: "${parsedCheckUrl.protocol}").`
+          );
+        } else {
+          proxyCheckUrl = parsedCheckUrl.href;
+        }
+      } catch {
+        errors.push(`"proxyCheckUrl" không đúng định dạng URL: "${rawConfig.proxyCheckUrl}".`);
+      }
+    }
+  }
+
+  // 9. Kiểm tra Proxy
   const rawProxy = rawConfig.proxy;
-  const isProxyEnabled = rawProxy?.enabled === true;
+  const isProxyExplicitlyEnabled = rawProxy?.enabled === true;
+  const isInitialProxy = initialConnectionMode === 'proxy';
   let proxyConfig: AppConfig['proxy'];
 
-  if (isProxyEnabled) {
-    if (!rawProxy?.server || typeof rawProxy.server !== 'string' || !rawProxy.server.trim()) {
+  const proxyServer =
+    typeof rawProxy?.server === 'string' && rawProxy.server.trim()
+      ? rawProxy.server.trim()
+      : undefined;
+  const proxyBypass =
+    typeof rawProxy?.bypass === 'string' && rawProxy.bypass.trim()
+      ? rawProxy.bypass.trim()
+      : undefined;
+  const proxyUsername = env.PROXY_USERNAME?.trim() || undefined;
+  const proxyPassword = env.PROXY_PASSWORD || undefined;
+
+  if (isProxyExplicitlyEnabled || isInitialProxy) {
+    if (!proxyServer) {
       errors.push('Khi proxy được bật (proxy.enabled = true), "proxy.server" không được để trống.');
-      proxyConfig = { enabled: true };
+      proxyConfig = {
+        enabled: true,
+        server: '',
+        bypass: proxyBypass,
+        username: proxyUsername,
+        password: proxyPassword
+      };
     } else {
       proxyConfig = {
         enabled: true,
-        server: rawProxy.server.trim(),
-        bypass: typeof rawProxy.bypass === 'string' ? rawProxy.bypass.trim() : undefined,
-        username: env.PROXY_USERNAME?.trim() || undefined,
-        password: env.PROXY_PASSWORD || undefined
+        server: proxyServer,
+        bypass: proxyBypass,
+        username: proxyUsername,
+        password: proxyPassword
       };
     }
   } else {
+    // Chế độ direct: giữ nguyên cấu hình server/bypass nếu người dùng đã nhập, không xóa cấu hình
     proxyConfig = {
-      enabled: false
+      enabled: false,
+      server: proxyServer,
+      bypass: proxyBypass,
+      username: proxyUsername,
+      password: proxyPassword
     };
+  }
+
+  // 10. Kiểm tra phoneMode và phoneNumbersFile
+  let phoneMode: 'mock' | 'live' = 'mock';
+  if (rawConfig.phoneMode !== undefined && rawConfig.phoneMode !== null) {
+    if (rawConfig.phoneMode !== 'mock' && rawConfig.phoneMode !== 'live') {
+      errors.push(
+        `"phoneMode" không hợp lệ: "${rawConfig.phoneMode}". Giá trị hợp lệ là "mock" hoặc "live" (mặc định là "mock").`
+      );
+    } else {
+      phoneMode = rawConfig.phoneMode;
+    }
+  }
+
+  let phoneNumbersFile: string | undefined;
+  if (rawConfig.phoneNumbersFile !== undefined && rawConfig.phoneNumbersFile !== null) {
+    if (typeof rawConfig.phoneNumbersFile !== 'string' || !rawConfig.phoneNumbersFile.trim()) {
+      errors.push('"phoneNumbersFile" phải là một chuỗi đường dẫn file hợp lệ.');
+    } else {
+      const trimmedFile = rawConfig.phoneNumbersFile.trim();
+      phoneNumbersFile = path.isAbsolute(trimmedFile)
+        ? path.normalize(trimmedFile)
+        : path.resolve(projectRoot, trimmedFile);
+    }
   }
 
   if (errors.length > 0 || !selectedProfile) {
@@ -350,7 +433,11 @@ export function validateConfig(
       actionTimeoutMs: actionTimeoutMs as number,
       flowName,
       screenshotOnError,
-      proxy: proxyConfig
+      initialConnectionMode,
+      proxyCheckUrl,
+      proxy: proxyConfig,
+      phoneNumbersFile,
+      phoneMode
     }
   };
 }
@@ -441,6 +528,8 @@ export function formatSafeConfig(config: AppConfig): Record<string, unknown> {
     actionTimeoutMs: config.actionTimeoutMs,
     flowName: config.flowName,
     screenshotOnError: config.screenshotOnError,
+    initialConnectionMode: config.initialConnectionMode,
+    proxyCheckUrl: config.proxyCheckUrl,
     proxy: config.proxy.enabled
       ? {
           enabled: true,
@@ -450,8 +539,14 @@ export function formatSafeConfig(config: AppConfig): Record<string, unknown> {
           username: config.proxy.username ? '***' : undefined
         }
       : {
-          enabled: false
-        }
+          enabled: false,
+          server: config.proxy.server,
+          bypass: config.proxy.bypass,
+          hasCredentials: Boolean(config.proxy.username || config.proxy.password),
+          username: config.proxy.username ? '***' : undefined
+        },
+    phoneMode: config.phoneMode,
+    phoneNumbersFile: config.phoneNumbersFile
   };
 }
 

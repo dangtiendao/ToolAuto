@@ -104,4 +104,25 @@ npm test
 ## 5. Các luồng nghiệp vụ có sẵn
 
 1. **`demo`**: Mở trang `startUrl`, kiểm tra DOM, ghi nhận tiêu đề và URL.
-2. **`yopmail-muse`**: Luồng tuần tự tự động hóa trên 2 tab (TabA mở YOPmail tạo hộp thư ngẫu nhiên 10-14 ký tự, TabB mở Muse.ai gửi email, TabA lấy OTP, TabB nhập OTP và xác nhận).
+2. **`yopmail-muse`**: Luồng tuần tự tự động hóa trên các tab:
+   - TabA: Tạo hộp thư ngẫu nhiên trên YOPmail.
+   - TabB: Mở Muse.ai, gửi mã OTP đến hộp thư YOPmail.
+   - TabA: Lấy mã OTP 6 số từ hộp thư YOPmail.
+   - TabB: Nhập mã OTP, nhập First name "Dang", Last name "Dao", chọn năm sinh 2000 và bấm tiếp tục.
+   - TabC: Mở trang bảo mật Meta (`https://accountscenter.meta.com/password_and_security`), chọn xác thực 2 yếu tố qua SMS hoặc WhatsApp, nhập số điện thoại ngẫu nhiên từ danh sách file TXT, chờ màn hình "Nhập mã xác nhận" hiển thị rồi bấm "Đóng".
+3. **`proxy-switch-demo`**: Luồng kiểm tra bật/tắt proxy an toàn giữa các giai đoạn kết nối.
+
+---
+
+## 6. Cấu hình danh sách số điện thoại (Cho TabC Meta)
+
+- **`phoneNumbersFile`**: Đường dẫn tới file TXT chứa danh sách số điện thoại (mỗi dòng một số). Mặc định: `"phone-numbers.example.txt"`.
+- **`phoneMode`**: Chế độ chạy:
+  - `"mock"` (mặc định): Phục vụ kiểm thử cục bộ/mock, không gửi mã SMS/WhatsApp thật đến Meta.
+  - `"live"`: Chỉ sử dụng cho tài khoản và số điện thoại được phép quản lý. Luôn yêu cầu người dùng xác nhận thủ công trong terminal trước khi gửi mã.
+
+> [!CAUTION]
+> **CẢNH BÁO VỀ DỮ LIỆU MẪU:**
+> Dữ liệu trong file `phone-numbers.example.txt` là dữ liệu giả lập chỉ phục vụ mục đích kiểm thử cục bộ và chạy thử nghiệm. **TUYỆT ĐỐI KHÔNG DÙNG DỮ LIỆU MẪU NÀY TRÊN HỆ THỐNG META THẬT.**
+> Khi sử dụng thực tế, người dùng phải tự tạo file danh sách số điện thoại riêng thuộc quyền sở hữu của mình và thêm file đó vào `.gitignore`.
+

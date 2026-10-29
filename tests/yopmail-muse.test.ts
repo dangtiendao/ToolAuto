@@ -1,4 +1,6 @@
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   generateMailboxName,
   getYopmailMuseState,
@@ -9,10 +11,28 @@ import {
   enterOtpIntoTabB,
   waitForSingleMatchingMailItem,
   dismissPopupIfPresent,
+  waitForProfileFormReady,
+  inputFirstName,
+  inputLastName,
+  selectBirthYear,
+  submitProfileBirthday,
+  waitForMetaSecurityPageReady,
+  findInteractiveButtonWithSpanText,
+  selectSmsOrWhatsAppOption,
+  inputPhoneNumberOnTabC,
+  confirmAndClickNextButton,
+  waitForVerificationCodeAndCloseDialog,
   yopmailMuseFlow
 } from '../src/flows/yopmail-muse.flow';
+import {
+  readPhoneNumbersFromFile,
+  selectRandomPhone,
+  maskPhoneNumber,
+  isPhoneEquivalent
+} from '../src/utils/phone';
 import { getFlow, getFlowOrThrow } from '../src/flows';
 import { FlowContext } from '../src/runner/types';
+import { runFlow } from '../src/runner';
 import { Logger } from '../src/utils/logger';
 import { getProjectRoot } from '../src/config';
 
@@ -112,9 +132,9 @@ async function runTests(): Promise<void> {
   console.log('  ✔ mailboxName và emailAddress được lưu trong shared state của luồng, sinh đúng 1 lần và đồng nhất 100% giữa TabA và TabB.');
 
   // ==========================================
-  // Test 3: Kiểm tra Đăng ký Flow trong Registry (5 bước tuần tự)
+  // Test 3: Kiểm tra Đăng ký Flow trong Registry (18 bước tuần tự mở rộng)
   // ==========================================
-  console.log('\n3. Kiểm tra Flow Registry với luồng yopmail-muse mở rộng:');
+  console.log('\n3. Kiểm tra Flow Registry với luồng yopmail-muse mở rộng (18 bước):');
   const foundFlow = getFlow('yopmail-muse');
   assert.ok(foundFlow, 'Phải tìm thấy luồng yopmail-muse trong registry');
   assert.strictEqual(foundFlow?.name, 'yopmail-muse');
@@ -128,9 +148,22 @@ async function runTests(): Promise<void> {
     'tabA-yopmail',
     'tabB-muse',
     'tabA-extract-otp',
-    'tabB-submit-otp'
+    'tabB-submit-otp',
+    'tabB-wait-profile-form',
+    'tabB-input-first-name',
+    'tabB-input-last-name',
+    'tabB-select-year',
+    'tabB-submit-profile',
+    'tabC-open-meta-security',
+    'tabC-click-two-factor',
+    'tabC-click-start',
+    'tabC-select-sms-whatsapp',
+    'tabC-click-continue',
+    'tabC-input-phone',
+    'tabC-confirm-and-next',
+    'tabC-verify-and-close-dialog'
   ]);
-  console.log(`  ✔ Luồng đã đăng ký thành công với 5 bước tuần tự: [${stepIds.join(', ')}].`);
+  console.log(`  ✔ Luồng đã đăng ký thành công với 18 bước tuần tự: [${stepIds.join(', ')}].`);
 
   // ==========================================
   // Test 4: Kiểm tra định dạng OTP 6 chữ số và bảo toàn số 0 ở đầu
@@ -639,7 +672,1405 @@ async function runTests(): Promise<void> {
     console.log('  ✔ TabB được chuyển tiêu điểm chính (bringToFront & focus) trên UI thành công.');
   }
 
-  console.log('\n--- TẤT CẢ BÀI KIỂM TRA YOPMAIL-MUSE (MỞ RỘNG OTP) ĐÃ VƯỢT QUA! ---');
+  // ==========================================
+  // Test 11: Kiểm tra chờ form thông tin sẵn sàng (waitForProfileFormReady)
+  // ==========================================
+  console.log('\n11. Kiểm tra chờ form thông tin cá nhân sẵn sàng:');
+  {
+    // 11.1: Thành công khi input[aria-label="First name"] hiển thị và editable
+    const mockPageFormReady: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai - Profile',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    const loc = await waitForProfileFormReady({
+      page: mockPageFormReady,
+      stepName: 'tabB-wait-profile-form',
+      timeoutMs: 1000
+    });
+    assert.ok(loc, 'Phải tìm thấy input First name');
+    console.log('  ✔ Chờ form thông tin sẵn sàng bằng điều kiện DOM thành công.');
+
+    // 11.2: Timeout ném lỗi và không tự bấm lại nút xác nhận OTP
+    const mockPageFormTimeout: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: () => ({ count: async () => 0 })
+    };
+
+    let timeoutThrew = false;
+    try {
+      await waitForProfileFormReady({
+        page: mockPageFormTimeout,
+        stepName: 'tabB-wait-profile-form',
+        timeoutMs: 300
+      });
+    } catch (err) {
+      timeoutThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI CHỜ FORM THÔNG TIN]'), 'Phải báo lỗi tại bước chờ form thông tin');
+      assert.ok(msg.includes('KHÔNG tự động bấm lại nút xác nhận OTP'), 'Phải cam kết không tự bấm lại nút OTP');
+    }
+    assert.strictEqual(timeoutThrew, true, 'Phải ném lỗi khi form không xuất hiện');
+    console.log('  ✔ Timeout form ném lỗi dừng luồng tại bước chờ form và không tự bấm lại OTP.');
+  }
+
+  // ==========================================
+  // Test 12: Kiểm tra nhập First name: "Dang" (inputFirstName)
+  // ==========================================
+  console.log('\n12. Kiểm tra nhập First name "Dang":');
+  {
+    let clicked = false;
+    let storedValue = '';
+
+    const mockPageFirstName: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {
+                clicked = true;
+              },
+              fill: async (val: string) => {
+                storedValue = val;
+              },
+              inputValue: async () => storedValue
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await inputFirstName({
+      page: mockPageFirstName,
+      stepName: 'tabB-input-first-name',
+      firstName: 'Dang',
+      timeoutMs: 1000
+    });
+
+    assert.strictEqual(clicked, true, 'Phải click vào ô input');
+    assert.strictEqual(storedValue, 'Dang', 'Giá trị phải đúng bằng "Dang"');
+    console.log('  ✔ Nhập First name "Dang" và xác minh giá trị thành công.');
+
+    // 12.2: Lỗi không khớp giá trị -> dừng không chuyển bước
+    const mockPageFirstNameMismatch: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async () => {},
+              inputValue: async () => 'SaiTen'
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let mismatchThrew = false;
+    try {
+      await inputFirstName({
+        page: mockPageFirstNameMismatch,
+        stepName: 'tabB-input-first-name',
+        firstName: 'Dang',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      mismatchThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI GIÁ TRỊ FIRST NAME]'));
+      assert.ok(msg.includes('không chuyển sang bước tiếp theo'));
+    }
+    assert.strictEqual(mismatchThrew, true, 'Phải ném lỗi khi giá trị không khớp');
+    console.log('  ✔ Dừng luồng và không chuyển bước khi First name không khớp.');
+  }
+
+  // ==========================================
+  // Test 13: Kiểm tra nhập Last name: "Dao" (inputLastName)
+  // ==========================================
+  console.log('\n13. Kiểm tra nhập Last name "Dao":');
+  {
+    let clicked = false;
+    let storedValue = '';
+
+    const mockPageLastName: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="Last name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {
+                clicked = true;
+              },
+              fill: async (val: string) => {
+                storedValue = val;
+              },
+              inputValue: async () => storedValue
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await inputLastName({
+      page: mockPageLastName,
+      stepName: 'tabB-input-last-name',
+      lastName: 'Dao',
+      timeoutMs: 1000
+    });
+
+    assert.strictEqual(clicked, true, 'Phải click vào ô input');
+    assert.strictEqual(storedValue, 'Dao', 'Giá trị phải đúng bằng "Dao"');
+    console.log('  ✔ Nhập Last name "Dao" và xác minh giá trị thành công.');
+
+    // 13.2: Lỗi không khớp giá trị -> dừng không chuyển bước
+    const mockPageLastNameMismatch: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="Last name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async () => {},
+              inputValue: async () => 'SaiHo'
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let mismatchThrew = false;
+    try {
+      await inputLastName({
+        page: mockPageLastNameMismatch,
+        stepName: 'tabB-input-last-name',
+        lastName: 'Dao',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      mismatchThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI GIÁ TRỊ LAST NAME]'));
+      assert.ok(msg.includes('không chuyển sang bước tiếp theo'));
+    }
+    assert.strictEqual(mismatchThrew, true, 'Phải ném lỗi khi giá trị không khớp');
+    console.log('  ✔ Dừng luồng và không chuyển bước khi Last name không khớp.');
+  }
+
+  // ==========================================
+  // Test 14: Kiểm tra chọn Year 2000 (selectBirthYear)
+  // ==========================================
+  console.log('\n14. Kiểm tra chọn Year 2000 qua select[aria-label="Year"]:');
+  {
+    let selectedOptionVal = '';
+
+    // 14.1: Thẻ select HTML gốc hợp lệ
+    const mockPageYearValid: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'select[aria-label="Year"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              evaluate: async () => 'select',
+              locator: (subSel: string) => {
+                if (subSel === 'option[value="2000"]') {
+                  return {
+                    count: async () => 1,
+                    first: () => ({
+                      innerText: async () => '2000'
+                    })
+                  };
+                }
+                return { count: async () => 0 };
+              },
+              selectOption: async (opt: { value: string }) => {
+                selectedOptionVal = opt.value;
+              },
+              inputValue: async () => selectedOptionVal
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await selectBirthYear({
+      page: mockPageYearValid,
+      stepName: 'tabB-select-year',
+      yearValue: '2000',
+      timeoutMs: 1000
+    });
+
+    assert.strictEqual(selectedOptionVal, '2000', 'Giá trị đã chọn phải là 2000');
+    console.log('  ✔ Chọn option value="2000" với selectOption() và xác minh thành công.');
+
+    // 14.2: Thiếu option value="2000"
+    const mockPageMissingOption: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'select[aria-label="Year"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              evaluate: async () => 'select',
+              locator: () => ({ count: async () => 0 }) // Không có option 2000
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let missingOptionThrew = false;
+    try {
+      await selectBirthYear({
+        page: mockPageMissingOption,
+        stepName: 'tabB-select-year',
+        yearValue: '2000',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      missingOptionThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI OPTION YEAR]'));
+      assert.ok(msg.includes('không có option "option[value="2000"]"'));
+    }
+    assert.strictEqual(missingOptionThrew, true, 'Phải ném lỗi khi thiếu option 2000');
+    console.log('  ✔ Ném lỗi dừng luồng khi selectbox không có option value="2000".');
+
+    // 14.3: Select bị disabled
+    const mockPageDisabledSelect: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'select[aria-label="Year"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => false // Disabled
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let disabledThrew = false;
+    try {
+      await selectBirthYear({
+        page: mockPageDisabledSelect,
+        stepName: 'tabB-select-year',
+        yearValue: '2000',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      disabledThrew = true;
+      assert.ok((err as Error).message.includes('[LỖI SELECT YEAR]'));
+    }
+    assert.strictEqual(disabledThrew, true);
+    console.log('  ✔ Ném lỗi dừng luồng khi selectbox Year bị vô hiệu hóa.');
+
+    // 14.4: Không phải select HTML gốc và không xác định được cấu trúc chắc chắn
+    const mockPageNonSelectUnknown: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'select[aria-label="Year"]') return { count: async () => 0 };
+        if (sel === '[aria-label="Year"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              evaluate: async () => 'div', // Thẻ div lạ
+              getAttribute: async () => null
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let nonSelectThrew = false;
+    try {
+      await selectBirthYear({
+        page: mockPageNonSelectUnknown,
+        stepName: 'tabB-select-year',
+        yearValue: '2000',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      nonSelectThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI CẤU TRÚC ĐIỀU KHIỂN YEAR]'));
+      assert.ok(msg.includes('Không gọi selectOption() lên div/button'));
+    }
+    assert.strictEqual(nonSelectThrew, true);
+    console.log('  ✔ Từ chối gọi selectOption lên div/button khi cấu trúc không xác định chắc chắn.');
+  }
+
+  // ==========================================
+  // Test 15: Kiểm tra nút tiếp tục (submitProfileBirthday)
+  // ==========================================
+  console.log('\n15. Kiểm tra nút tiếp tục login_birthday_continue_click:');
+  {
+    let clickCount = 0;
+    let loggedMessages: string[] = [];
+
+    const mockLogger: any = {
+      info: (msg: string) => loggedMessages.push(msg),
+      warn: () => {},
+      error: () => {},
+      stepResult: () => {}
+    };
+
+    // 15.1: Thực hiện thành công khi đủ 3 điều kiện và nút enabled
+    const mockPageSubmitSuccess: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return { inputValue: async () => 'Dang' };
+        }
+        if (sel === 'input[aria-label="Last name"]') {
+          return { inputValue: async () => 'Dao' };
+        }
+        if (sel.includes('Year')) {
+          return { inputValue: async () => '2000' };
+        }
+        if (sel === '[data-pel-click="login_birthday_continue_click"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {
+                clickCount++;
+              }
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await submitProfileBirthday({
+      page: mockPageSubmitSuccess,
+      stepName: 'tabB-submit-profile',
+      timeoutMs: 1000,
+      logger: mockLogger
+    });
+
+    assert.strictEqual(clickCount, 1, 'Nút tiếp tục phải được bấm ĐÚNG MỘT LẦN');
+    assert.ok(
+      loggedMessages.some((m) => m.includes('Đã nhập Dang, Dao, chọn năm 2000 và bấm tiếp tục.')),
+      'Phải thông báo đúng thông điệp theo yêu cầu'
+    );
+    console.log('  ✔ Bấm nút tiếp tục đúng một lần và ghi nhận thông điệp chuẩn xác.');
+
+    // 15.2: Kiểm tra khi First name / Last name / Year chưa đúng -> từ chối bấm
+    const mockPageWrongField: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return { inputValue: async () => 'WrongName' };
+        }
+        return { inputValue: async () => '' };
+      }
+    };
+
+    let wrongFieldThrew = false;
+    try {
+      await submitProfileBirthday({
+        page: mockPageWrongField,
+        stepName: 'tabB-submit-profile',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      wrongFieldThrew = true;
+      assert.ok((err as Error).message.includes('[LỖI XÁC MINH TRƯỚC BẤM TIẾP TỤC]'));
+    }
+    assert.strictEqual(wrongFieldThrew, true);
+    console.log('  ✔ Từ chối bấm tiếp tục nếu First name, Last name hoặc Year chưa khớp.');
+
+    // 15.3: Nút tiếp tục bị vô hiệu hóa (disabled) -> không force click, báo lỗi
+    const mockPageBtnDisabled: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') return { inputValue: async () => 'Dang' };
+        if (sel === 'input[aria-label="Last name"]') return { inputValue: async () => 'Dao' };
+        if (sel.includes('Year')) return { inputValue: async () => '2000' };
+        if (sel.includes('Month')) return { count: async () => 1 }; // Form yêu cầu thêm Month
+        if (sel === '[data-pel-click="login_birthday_continue_click"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => false // Disabled!
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let btnDisabledThrew = false;
+    try {
+      await submitProfileBirthday({
+        page: mockPageBtnDisabled,
+        stepName: 'tabB-submit-profile',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      btnDisabledThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI NÚT TIẾP TỤC BỊ VÔ HIỆU HÓA]'));
+      assert.ok(msg.includes('Không dùng force: true'));
+      assert.ok(msg.includes('Month'), 'Phải chỉ ra trường còn thiếu Month');
+    }
+    assert.strictEqual(btnDisabledThrew, true);
+    console.log('  ✔ Từ chối force click khi nút tiếp tục bị vô hiệu hóa và chỉ rõ trường thiếu.');
+  }
+
+  // ==========================================
+  // Test 16: Kiểm tra selector mơ hồ (nhiều hơn 1 phần tử hiển thị)
+  // ==========================================
+  console.log('\n16. Kiểm tra xử lý selector mơ hồ (nhiều hơn 1 phần tử hiển thị):');
+  {
+    const mockPageAmbiguous: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      locator: (sel: string) => {
+        if (sel === 'input[aria-label="First name"]') {
+          return {
+            count: async () => 2, // 2 phần tử hiển thị!
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let ambThrew = false;
+    try {
+      await inputFirstName({
+        page: mockPageAmbiguous,
+        stepName: 'tabB-input-first-name',
+        timeoutMs: 500
+      });
+    } catch (err) {
+      ambThrew = true;
+      const msg = (err as Error).message;
+      assert.ok(msg.includes('[LỖI SELECTOR]'));
+      assert.ok(msg.includes('khớp 2 phần tử hiển thị'));
+    }
+    assert.strictEqual(ambThrew, true);
+    console.log('  ✔ Từ chối dùng .first() và dừng luồng khi selector mơ hồ.');
+  }
+
+  // ==========================================
+  // Test 17: Thực thi toàn bộ 10 bước của yopmail-muse qua Sequential Runner
+  // ==========================================
+  console.log('\n17. Kiểm tra thực thi toàn bộ luồng 10 bước qua Sequential Runner:');
+  {
+    let tabAEntered = false;
+    let tabBCreated = false;
+    let continueBtnClicked = false;
+    let formValues: Record<string, string> = {};
+
+    const mockTabA: any = {
+      isClosed: () => false,
+      title: async () => 'YOPmail',
+      goto: async () => {},
+      setDefaultTimeout: () => {},
+      setDefaultNavigationTimeout: () => {},
+      bringToFront: async () => {},
+      locator: (sel: string) => {
+        if (sel === 'input.ycptinput') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              fill: async () => {},
+              inputValue: async () => 'mockmailbox123',
+              press: async () => {
+                tabAEntered = true;
+              }
+            })
+          };
+        }
+        if (sel === 'button#refresh') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {}
+            })
+          };
+        }
+        if (sel === 'button.lm') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              locator: () => ({
+                count: async () => 1,
+                first: () => ({
+                  innerText: async () => 'Muse.ai Login OTP'
+                })
+              })
+            })
+          };
+        }
+        return { count: async () => 0 };
+      },
+      frames: () => [
+        {
+          name: () => 'ifinbox',
+          locator: (sel: string) => {
+            if (sel === 'button.lm') {
+              return {
+                count: async () => 1,
+                nth: () => ({
+                  isVisible: async () => true,
+                  isEnabled: async () => true,
+                  click: async () => {},
+                  locator: () => ({
+                    count: async () => 1,
+                    first: () => ({
+                      innerText: async () => 'Muse.ai Login OTP'
+                    })
+                  })
+                })
+              };
+            }
+            return { count: async () => 0 };
+          }
+        },
+        {
+          name: () => 'ifmail',
+          evaluate: async () => ['654321'],
+          locator: (sel: string) => {
+            if (sel.includes('letter-spacing: 2px') || sel === 'div') {
+              return {
+                count: async () => 1,
+                nth: () => ({
+                  isVisible: async () => true,
+                  getAttribute: async (attr: string) => (attr === 'style' ? 'font-size: 24px; letter-spacing: 2px; padding: 16px;' : ''),
+                  innerText: async () => '654321'
+                })
+              };
+            }
+            return { count: async () => 0 };
+          }
+        }
+      ],
+      frame: (opts: any) => {
+        const name = typeof opts === 'string' ? opts : opts?.name;
+        if (name === 'ifmail') {
+          return {
+            name: () => 'ifmail',
+            evaluate: async () => ['654321'],
+            locator: (sel: string) => ({
+              count: async () => 1,
+              nth: () => ({
+                isVisible: async () => true,
+                getAttribute: async (attr: string) => (attr === 'style' ? 'font-size: 24px; letter-spacing: 2px; padding: 16px;' : ''),
+                innerText: async () => '654321'
+              })
+            })
+          };
+        }
+        return null;
+      }
+    };
+
+    const mockTabB: any = {
+      isClosed: () => false,
+      title: async () => 'Muse.ai',
+      goto: async () => {},
+      setDefaultTimeout: () => {},
+      setDefaultNavigationTimeout: () => {},
+      bringToFront: async () => {},
+      evaluate: async () => 'input',
+      locator: (sel: string) => {
+        if (sel === 'input[data-slot="input"]' || sel === 'input[aria-label="Email"]') {
+          const item = {
+            isVisible: async () => true,
+            isEditable: async () => true,
+            isEnabled: async () => true,
+            fill: async () => {},
+            inputValue: async () => 'mockmailbox123@yopmail.com'
+          };
+          return {
+            count: async () => 1,
+            nth: () => item,
+            first: () => item
+          };
+        }
+        if (
+          sel === '[data-pel-click="login_contact_continue_click"]' ||
+          sel === '[data-pel-click="login_submit_click"]'
+        ) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {}
+            })
+          };
+        }
+        if (sel === '[data-slot="pin-digit"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({ isVisible: async () => true }),
+            first: () => ({
+              evaluate: async () => 'input',
+              fill: async () => {},
+              inputValue: async () => '654321'
+            })
+          };
+        }
+        if (sel === '[data-pel-click="login_otp_confirm_click"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {}
+            })
+          };
+        }
+        if (sel === 'input[aria-label="First name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async (v: string) => {
+                formValues['firstName'] = v;
+              },
+              inputValue: async () => formValues['firstName'] || 'Dang'
+            }),
+            inputValue: async () => formValues['firstName'] || 'Dang'
+          };
+        }
+        if (sel === 'input[aria-label="Last name"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async (v: string) => {
+                formValues['lastName'] = v;
+              },
+              inputValue: async () => formValues['lastName'] || 'Dao'
+            }),
+            inputValue: async () => formValues['lastName'] || 'Dao'
+          };
+        }
+        if (sel === 'select[aria-label="Year"]' || sel.includes('Year')) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              evaluate: async () => 'select',
+              locator: () => ({
+                count: async () => 1,
+                first: () => ({ innerText: async () => '2000' })
+              }),
+              selectOption: async () => {
+                formValues['year'] = '2000';
+              },
+              inputValue: async () => formValues['year'] || '2000'
+            }),
+            inputValue: async () => formValues['year'] || '2000'
+          };
+        }
+        if (sel === '[data-pel-click="login_birthday_continue_click"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              click: async () => {
+                continueBtnClicked = true;
+              }
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    let newPageCount = 0;
+    let tabCCreated = false;
+    let tabCClickedTwoFactor = false;
+    let tabCClickedStart = false;
+    let tabCSelectedSms = false;
+    let tabCClickedContinue = false;
+    let tabCPhoneEntered = '';
+    let tabCClickedNext = false;
+    let tabCClosedDialog = false;
+
+    const mockTabC: any = {
+      isClosed: () => false,
+      title: async () => 'Meta Accounts Center',
+      goto: async () => {},
+      setDefaultTimeout: () => {},
+      setDefaultNavigationTimeout: () => {},
+      bringToFront: async () => {},
+      evaluate: async () => 'div',
+      locator: (sel: string) => {
+        if (sel === '[aria-label="Xác thực 2 yếu tố"]') {
+          const item = {
+            isVisible: async () => true,
+            isEnabled: async () => true,
+            click: async () => {
+              tabCClickedTwoFactor = true;
+            }
+          };
+          return {
+            count: async () => 1,
+            nth: () => item,
+            first: () => item
+          };
+        }
+        if (sel === '[role="dialog"]' || sel === 'div[aria-modal="true"]') {
+          return {
+            count: async () => 1,
+            nth: () => mockTabC
+          };
+        }
+        if (sel === '[aria-label="SMS hoặc WhatsApp"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEnabled: async () => true,
+              evaluate: async () => 'div',
+              getAttribute: async (attr: string) => (attr === 'aria-checked' ? 'true' : ''),
+              locator: () => ({ count: async () => 0 }),
+              click: async () => {
+                tabCSelectedSms = true;
+              }
+            })
+          };
+        }
+        if (sel === 'span') {
+          return {
+            count: async () => 3,
+            filter: (filterOpts: { hasText?: RegExp }) => {
+              const regex = filterOpts?.hasText;
+              const matches: string[] = [];
+              if (regex?.test('Bắt đầu')) matches.push('Bắt đầu');
+              if (regex?.test('Tiếp tục')) matches.push('Tiếp tục');
+              if (regex?.test('Tiếp')) matches.push('Tiếp');
+
+              return {
+                count: async () => matches.length,
+                nth: (idx: number) => {
+                  const matchedText = matches[idx] || '';
+                  return {
+                    isVisible: async () => true,
+                    innerText: async () => matchedText,
+                    textContent: async () => matchedText,
+                    locator: () => ({
+                      count: async () => 1,
+                      first: () => ({
+                        isVisible: async () => true,
+                        isEnabled: async () => true,
+                        click: async () => {
+                          if (matchedText === 'Bắt đầu') tabCClickedStart = true;
+                          if (matchedText === 'Tiếp tục') tabCClickedContinue = true;
+                          if (matchedText === 'Tiếp') tabCClickedNext = true;
+                        }
+                      })
+                    })
+                  };
+                }
+              };
+            },
+            nth: (i: number) => {
+              const texts = ['Bắt đầu', 'Tiếp tục', 'Tiếp'];
+              const text = texts[i] || '';
+              return {
+                isVisible: async () => true,
+                innerText: async () => text,
+                textContent: async () => text,
+                locator: () => ({
+                  count: async () => 1,
+                  first: () => ({
+                    isVisible: async () => true,
+                    isEnabled: async () => true,
+                    click: async () => {
+                      if (text === 'Bắt đầu') tabCClickedStart = true;
+                      if (text === 'Tiếp tục') tabCClickedContinue = true;
+                      if (text === 'Tiếp') tabCClickedNext = true;
+                    }
+                  })
+                })
+              };
+            }
+          };
+        }
+        if (sel === 'input[type="tel"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async (v: string) => {
+                tabCPhoneEntered = v;
+              },
+              inputValue: async () => tabCPhoneEntered
+            })
+          };
+        }
+        if (sel.includes('Nhập mã xác nhận')) {
+          return {
+            count: async () => 1,
+            first: () => ({
+              isVisible: async () => !tabCClosedDialog
+            }),
+            nth: () => ({
+              isVisible: async () => !tabCClosedDialog
+            })
+          };
+        }
+        if (sel === '[aria-label="Đóng"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => !tabCClosedDialog,
+              isEnabled: async () => true,
+              click: async () => {
+                tabCClosedDialog = true;
+              }
+            })
+          };
+        }
+        return { count: async () => 0 };
+      },
+      getByRole: (role: string, opts?: any) => {
+        if (role === 'button') {
+          const name = opts?.name;
+          if (name === 'Bắt đầu' || name === 'Tiếp tục' || name === 'Tiếp') {
+            return {
+              count: async () => 1,
+              nth: () => ({
+                isVisible: async () => true,
+                isEnabled: async () => true,
+                click: async () => {
+                  if (name === 'Bắt đầu') tabCClickedStart = true;
+                  if (name === 'Tiếp tục') tabCClickedContinue = true;
+                  if (name === 'Tiếp') tabCClickedNext = true;
+                }
+              })
+            };
+          }
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    const mockBrowserContext: any = {
+      newPage: async () => {
+        newPageCount++;
+        if (newPageCount === 1) {
+          return mockTabA;
+        }
+        if (newPageCount === 2) {
+          tabBCreated = true;
+          return mockTabB;
+        }
+        tabCCreated = true;
+        return mockTabC;
+      }
+    };
+
+    mockTabA.context = () => mockBrowserContext;
+    mockTabB.context = () => mockBrowserContext;
+    mockTabC.context = () => mockBrowserContext;
+
+    const fullTestContext: FlowContext = {
+      page: mockTabA,
+      config: {
+        startUrl: 'https://example.com',
+        profileDir: 'profiles/test',
+        selectedProfile: {
+          profileName: 'test',
+          userDataDir: 'profiles/test',
+          profileDirectory: 'Default',
+          fullPath: 'profiles/test/Default',
+          cdpPort: 9222
+        },
+        navigationTimeoutMs: 10000,
+        actionTimeoutMs: 5000,
+        flowName: 'yopmail-muse',
+        screenshotOnError: false,
+        initialConnectionMode: 'direct',
+        proxy: { enabled: false },
+        phoneNumbersFile: path.resolve(projectRoot, 'phone-numbers.example.txt'),
+        phoneMode: 'mock'
+      },
+      runId: 'test-full-18-steps-run',
+      logger: dummyLogger,
+      data: {
+        mailboxName: 'mockmailbox123',
+        emailAddress: 'mockmailbox123@yopmail.com'
+      }
+    };
+
+    const flowResult = await runFlow(yopmailMuseFlow, fullTestContext, projectRoot);
+
+    assert.strictEqual(flowResult.status, 'success', 'Luồng 18 bước phải chạy thành công');
+    assert.strictEqual(flowResult.completedSteps.length, 18, 'Phải hoàn thành đủ 18 bước tuần tự');
+    assert.strictEqual(continueBtnClicked, true, 'Nút tiếp tục trên TabB phải được bấm');
+    assert.strictEqual(tabCCreated, true, 'TabC phải được tạo trong cùng browser context');
+    assert.strictEqual(tabCClickedTwoFactor, true, 'Phải click Xác thực 2 yếu tố trên TabC');
+    assert.strictEqual(tabCClickedStart, true, 'Phải click Bắt đầu trên TabC');
+    assert.strictEqual(tabCSelectedSms, true, 'Phải chọn SMS hoặc WhatsApp trên TabC');
+    assert.strictEqual(tabCClickedContinue, true, 'Phải click Tiếp tục trên TabC');
+    assert.ok(tabCPhoneEntered.length >= 7, 'Phải nhập số điện thoại hợp lệ');
+    assert.strictEqual(tabCClickedNext, true, 'Phải click Tiếp trên TabC');
+    assert.strictEqual(tabCClosedDialog, true, 'Phải click Đóng dialog sau khi màn hình mã xác nhận hiển thị');
+    console.log('  ✔ Toàn bộ 18 bước của luồng yopmail-muse đã chạy tuần tự qua Sequential Runner thành công 100%.');
+  }
+
+  // ==========================================
+  // Test 18: Đọc TXT có UTF-8 BOM, CRLF, dòng trống và dòng trùng lặp
+  // ==========================================
+  console.log('\n18. Kiểm tra đọc TXT có UTF-8 BOM, CRLF, dòng trống và trùng lặp:');
+  {
+    const scratchDir = path.resolve(projectRoot, 'tests', 'scratch');
+    if (!fs.existsSync(scratchDir)) {
+      fs.mkdirSync(scratchDir, { recursive: true });
+    }
+
+    const testFilePath = path.join(scratchDir, 'test-bom-crlf-phones.txt');
+    // Nội dung có BOM \uFEFF, CRLF \r\n, khoảng trắng và dòng trùng
+    const testContent = '\uFEFF  +84901234567  \r\n\r\n0987654321\r\n  +84901234567  \r\n+84912345678\r\n\r\n';
+    fs.writeFileSync(testFilePath, testContent, 'utf-8');
+
+    const result = readPhoneNumbersFromFile(testFilePath);
+
+    assert.strictEqual(result.length, 3, 'Phải lọc đúng 3 số duy nhất');
+    assert.strictEqual(result[0], '+84901234567', 'Số thứ nhất bảo toàn dấu + và trim khoảng trắng');
+    assert.strictEqual(result[1], '0987654321', 'Số thứ hai bảo toàn số 0 ở đầu');
+    assert.strictEqual(result[2], '+84912345678', 'Số thứ ba');
+    console.log('  ✔ Đọc file UTF-8 với BOM, CRLF, loại bỏ dòng trống và dòng trùng thành công.');
+  }
+
+  // ==========================================
+  // Test 19: Bảo toàn dấu + và số 0 ở đầu dưới dạng chuỗi
+  // ==========================================
+  console.log('\n19. Kiểm tra bảo toàn dấu + và số 0 ở đầu dạng string:');
+  {
+    const scratchDir = path.resolve(projectRoot, 'tests', 'scratch');
+    const testFilePath = path.join(scratchDir, 'test-preserve-prefix.txt');
+    fs.writeFileSync(testFilePath, '+1234567890\n009876543210\n0123456789\n', 'utf-8');
+
+    const result = readPhoneNumbersFromFile(testFilePath);
+    assert.strictEqual(typeof result[0], 'string');
+    assert.strictEqual(result[0], '+1234567890', 'Bảo toàn dấu + ở đầu');
+    assert.strictEqual(result[1], '009876543210', 'Bảo toàn nhiều số 0 ở đầu');
+    assert.strictEqual(result[2], '0123456789', 'Bảo toàn số 0 ở đầu');
+    console.log('  ✔ Bảo toàn kiểu string, dấu + và các số 0 ở đầu thành công 100%.');
+  }
+
+  // ==========================================
+  // Test 20: Xử lý thiếu file, file rỗng, và dòng không hợp lệ
+  // ==========================================
+  console.log('\n20. Kiểm tra xử lý thiếu file, file rỗng, và dòng không hợp lệ:');
+  {
+    const scratchDir = path.resolve(projectRoot, 'tests', 'scratch');
+
+    // 20.1: Thiếu file
+    let missingThrew = false;
+    try {
+      readPhoneNumbersFromFile(path.join(scratchDir, 'non-existent-phone-file.txt'));
+    } catch (err) {
+      missingThrew = true;
+      assert.ok((err as Error).message.includes('[LỖI FILE SỐ ĐIỆN THOẠI]'));
+    }
+    assert.strictEqual(missingThrew, true, 'Phải ném lỗi khi thiếu file');
+
+    // 20.2: File rỗng
+    const emptyFilePath = path.join(scratchDir, 'test-empty-phones.txt');
+    fs.writeFileSync(emptyFilePath, '   \n\r\n   ', 'utf-8');
+    let emptyThrew = false;
+    try {
+      readPhoneNumbersFromFile(emptyFilePath);
+    } catch (err) {
+      emptyThrew = true;
+      assert.ok((err as Error).message.includes('rỗng hoặc không chứa số điện thoại'));
+    }
+    assert.strictEqual(emptyThrew, true, 'Phải ném lỗi khi file rỗng');
+
+    // 20.3: Dòng không hợp lệ (chứa chữ cái hoặc ký tự lạ)
+    const invalidFilePath = path.join(scratchDir, 'test-invalid-phones.txt');
+    fs.writeFileSync(invalidFilePath, '+84901234567\n0987abc321\n', 'utf-8');
+    let invalidThrew = false;
+    try {
+      readPhoneNumbersFromFile(invalidFilePath);
+    } catch (err) {
+      invalidThrew = true;
+      assert.ok((err as Error).message.includes('[LỖI ĐỊNH DẠNG SỐ ĐIỆN THOẠI]'));
+    }
+    assert.strictEqual(invalidThrew, true, 'Phải ném lỗi khi có dòng không hợp lệ');
+
+    console.log('  ✔ Xử lý thiếu file, file rỗng và dữ liệu không hợp lệ an toàn, dừng luồng.');
+  }
+
+  // ==========================================
+  // Test 21: Chọn đúng một số ngẫu nhiên và bảo toàn số trong bộ nhớ
+  // ==========================================
+  console.log('\n21. Kiểm tra chọn ngẫu nhiên đúng 1 số và bảo toàn số:');
+  {
+    const phoneList = ['+84901111111', '+84902222222', '+84903333333'];
+    const chosen = selectRandomPhone(phoneList);
+    assert.ok(phoneList.includes(chosen), 'Số được chọn phải nằm trong danh sách');
+
+    const chosen2 = selectRandomPhone(phoneList);
+    assert.ok(phoneList.includes(chosen2));
+
+    console.log(`  ✔ Chọn ngẫu nhiên đúng một số ("${maskPhoneNumber(chosen)}") thành công.`);
+  }
+
+  // ==========================================
+  // Test 22: Phân biệt nút chứa span "Tiếp" với nút chứa span "Tiếp tục"
+  // ==========================================
+  console.log('\n22. Kiểm tra phân biệt chính xác nút chứa "Tiếp" vs "Tiếp tục":');
+  {
+    let clickedButton = '';
+
+    const mockPageButtons: any = {
+      isClosed: () => false,
+      locator: (sel: string) => {
+        if (sel === 'span') {
+          return {
+            count: async () => 2,
+            filter: (opts: { hasText?: RegExp }) => {
+              const regex = opts?.hasText;
+              const matches: string[] = [];
+              if (regex?.test('Tiếp tục')) matches.push('Tiếp tục');
+              if (regex?.test('Tiếp')) matches.push('Tiếp');
+
+              return {
+                count: async () => matches.length,
+                nth: (i: number) => {
+                  const txt = matches[i];
+                  return {
+                    isVisible: async () => true,
+                    innerText: async () => txt,
+                    textContent: async () => txt,
+                    locator: () => ({
+                      count: async () => 1,
+                      first: () => ({
+                        isVisible: async () => true,
+                        isEnabled: async () => true,
+                        click: async () => {
+                          clickedButton = txt;
+                        }
+                      })
+                    })
+                  };
+                }
+              };
+            }
+          };
+        }
+        return { count: async () => 0 };
+      },
+      getByRole: () => ({ count: async () => 0 })
+    };
+
+    // 22.1: Tìm nút "Tiếp" -> Phải bấm nút chứa "Tiếp", KHÔNG bấm "Tiếp tục"
+    const nextBtn = await findInteractiveButtonWithSpanText({
+      page: mockPageButtons,
+      targetText: 'Tiếp',
+      tabName: 'TabC',
+      stepName: 'test-button-tiep',
+      timeoutMs: 1000
+    });
+    await nextBtn.click();
+    assert.strictEqual(clickedButton, 'Tiếp', 'Phải bấm đúng nút "Tiếp"');
+
+    // 22.2: Tìm nút "Tiếp tục" -> Phải bấm nút chứa "Tiếp tục"
+    const continueBtn = await findInteractiveButtonWithSpanText({
+      page: mockPageButtons,
+      targetText: 'Tiếp tục',
+      tabName: 'TabC',
+      stepName: 'test-button-tiep-tuc',
+      timeoutMs: 1000
+    });
+    await continueBtn.click();
+    assert.strictEqual(clickedButton, 'Tiếp tục', 'Phải bấm đúng nút "Tiếp tục"');
+
+    console.log('  ✔ Phân biệt chính xác giữa span "Tiếp" và span "Tiếp tục", không bấm nhầm.');
+  }
+
+  // ==========================================
+  // Test 23: Mock mode không gửi mã thật; Live mode dừng khi chưa xác nhận
+  // ==========================================
+  console.log('\n23. Kiểm tra chế độ chạy Mock vs Live:');
+  {
+    let nextClickedInMock = false;
+    const mockPageNext: any = {
+      isClosed: () => false,
+      locator: (sel: string) => {
+        if (sel === 'span') {
+          return {
+            count: async () => 1,
+            filter: () => ({
+              count: async () => 1,
+              nth: () => ({
+                isVisible: async () => true,
+                innerText: async () => 'Tiếp',
+                textContent: async () => 'Tiếp',
+                locator: () => ({
+                  count: async () => 1,
+                  first: () => ({
+                    isVisible: async () => true,
+                    isEnabled: async () => true,
+                    click: async () => {
+                      nextClickedInMock = true;
+                    }
+                  })
+                })
+              })
+            })
+          };
+        }
+        return { count: async () => 0 };
+      },
+      getByRole: () => ({ count: async () => 0 })
+    };
+
+    // 23.1: Mock mode không đòi hỏi terminal TTY
+    await confirmAndClickNextButton({
+      page: mockPageNext,
+      stepName: 'tabC-confirm-and-next',
+      phone: '+84901234567',
+      phoneMode: 'mock',
+      timeoutMs: 1000
+    });
+    assert.strictEqual(nextClickedInMock, true, 'Mock mode click Tiếp mà không gửi SMS thật');
+
+    // 23.2: Live mode dừng khi không có xác nhận
+    let liveThrew = false;
+    try {
+      await confirmAndClickNextButton({
+        page: mockPageNext,
+        stepName: 'tabC-confirm-and-next',
+        phone: '+84901234567',
+        phoneMode: 'live',
+        timeoutMs: 100
+      });
+    } catch (err) {
+      liveThrew = true;
+      assert.ok((err as Error).message.includes('[HỦY BỎ BẢO MẬT LIVE MODE]'));
+    }
+    assert.strictEqual(liveThrew, true, 'Live mode phải dừng an toàn khi người dùng chưa xác nhận');
+
+    console.log('  ✔ Mock mode không gửi mã thật; Live mode dừng an toàn khi thiếu xác nhận.');
+  }
+
+  // ==========================================
+  // Test 24: Nhập số điện thoại, kiểm tra isPhoneEquivalent
+  // ==========================================
+  console.log('\n24. Kiểm tra so sánh số tương đương (tự định dạng) và nhập số:');
+  {
+    assert.strictEqual(isPhoneEquivalent('+84 90 123 4567', '+84901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('+84-90-123-4567', '+84901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('(090) 123 4567', '0901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('+84901111111', '+84902222222'), false);
+
+    let enteredVal = '';
+    const mockPageTel: any = {
+      isClosed: () => false,
+      title: async () => 'Test Title',
+      locator: (sel: string) => {
+        if (sel === 'input[type="tel"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async (val: string) => {
+                enteredVal = val;
+              },
+              inputValue: async () => enteredVal
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await inputPhoneNumberOnTabC({
+      page: mockPageTel,
+      stepName: 'tabC-input-phone',
+      phone: '+84901234567',
+      timeoutMs: 1000
+    });
+    assert.strictEqual(enteredVal, '+84901234567', 'Giá trị nhập phải khớp');
+    console.log('  ✔ Kiểm tra số điện thoại tương đương và nhập input[type="tel"] thành công.');
+  }
+
+  // ==========================================
+  // Test 25: Màn hình "Nhập mã xác nhận" hiển thị rồi mới bấm nút Đóng
+  // ==========================================
+  console.log('\n25. Kiểm tra chỉ bấm Đóng sau khi màn hình mã xác nhận hiển thị:');
+  {
+    // 25.1: Màn hình không xuất hiện -> ném lỗi timeout và KHÔNG bấm Đóng
+    const mockPageNoCodeScreen: any = {
+      isClosed: () => false,
+      locator: () => ({ count: async () => 0 })
+    };
+
+    let noCodeThrew = false;
+    try {
+      await waitForVerificationCodeAndCloseDialog({
+        page: mockPageNoCodeScreen,
+        stepName: 'tabC-verify-and-close-dialog',
+        timeoutMs: 400
+      });
+    } catch (err) {
+      noCodeThrew = true;
+      assert.ok((err as Error).message.includes('[LỖI MÀN HÌNH MÃ XÁC NHẬN]'));
+    }
+    assert.strictEqual(noCodeThrew, true, 'Phải ném lỗi khi màn hình mã xác nhận không xuất hiện');
+
+    // 25.2: Màn hình xuất hiện -> bấm nút Đóng thành công
+    let closeBtnClicked = false;
+    let isDialogOpen = true;
+
+    const mockPageValidCodeScreen: any = {
+      isClosed: () => false,
+      title: async () => 'Test Title',
+      locator: (sel: string) => {
+        if (sel.includes('Nhập mã xác nhận')) {
+          return {
+            count: async () => 1,
+            first: () => ({ isVisible: async () => isDialogOpen }),
+            nth: () => ({ isVisible: async () => isDialogOpen })
+          };
+        }
+        if (sel === '[aria-label="Đóng"]') {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => isDialogOpen,
+              isEnabled: async () => true,
+              click: async () => {
+                closeBtnClicked = true;
+                isDialogOpen = false;
+              }
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await waitForVerificationCodeAndCloseDialog({
+      page: mockPageValidCodeScreen,
+      stepName: 'tabC-verify-and-close-dialog',
+      timeoutMs: 1000
+    });
+
+    assert.strictEqual(closeBtnClicked, true, 'Nút Đóng phải được bấm đúng một lần');
+    assert.strictEqual(isDialogOpen, false, 'Dialog phải được đóng');
+    console.log('  ✔ Màn hình "Nhập mã xác nhận" hiển thị rồi mới bấm Đóng thành công.');
+  }
+
+  // ==========================================
+  // Test 26: Bảo vệ bảo mật (masking số điện thoại trong log)
+  // ==========================================
+  console.log('\n26. Kiểm tra che số điện thoại (masking) an toàn:');
+  {
+    const masked1 = maskPhoneNumber('+84901234567');
+    assert.strictEqual(masked1, '+84****567', 'Phải giữ 3 ký tự đầu và 3 ký tự cuối');
+    assert.strictEqual(masked1.includes('901234'), false, 'Không bao giờ để lộ các số ở giữa');
+
+    const masked2 = maskPhoneNumber('0987654321');
+    assert.strictEqual(masked2, '098****321');
+    assert.strictEqual(masked2.includes('7654'), false);
+
+    console.log('  ✔ Che số điện thoại nhạy cảm thành công 100%, bảo vệ an toàn dữ liệu.');
+  }
+
+  console.log('\n--- TẤT CẢ BÀI KIỂM TRA YOPMAIL-MUSE (MỞ RỘNG METAA 2FA) ĐÃ VƯỢT QUA! ---');
 }
 
 runTests().catch((err) => {

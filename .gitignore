@@ -8,6 +8,7 @@ dist/
 profiles/
 logs/
 screenshots/
+tests/scratch/
 
 # Environment files
 .env
@@ -19,3 +20,10 @@ config/config.json
 config/*.local.*
 config/secrets.*
 config/credentials.*
+
+# Phone numbers sensitive data files
+phone-numbers.txt
+*.phone.txt
+data/phone*
+config/phone*
+!phone-numbers.example.txt

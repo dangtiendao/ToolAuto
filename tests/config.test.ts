@@ -407,4 +407,58 @@ console.log('\n10. Kiểm tra các lỗi cơ bản (URL, Timeout, Proxy server):
   console.log('  ✔ Kiểm tra các lỗi URL, Timeout, Proxy thành công.');
 }
 
+// ==========================================
+// Test 11: Kiểm tra cấu hình phoneMode và phoneNumbersFile
+// ==========================================
+console.log('\n11. Kiểm tra cấu hình phoneMode và phoneNumbersFile:');
+{
+  // 11.1: Mặc định phoneMode là "mock"
+  const defaultMode = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t' },
+    projectRoot
+  );
+  assert.strictEqual(defaultMode.valid, true);
+  assert.strictEqual(defaultMode.config?.phoneMode, 'mock', 'Mặc định phoneMode phải là "mock"');
+
+  // 11.2: Cấu hình phoneMode là "live"
+  const liveMode = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t', phoneMode: 'live' },
+    projectRoot
+  );
+  assert.strictEqual(liveMode.valid, true);
+  assert.strictEqual(liveMode.config?.phoneMode, 'live');
+
+  // 11.3: Cấu hình phoneMode không hợp lệ
+  const invalidMode = validateConfig(
+    { startUrl: 'https://example.com', profileDir: 'profiles/t', phoneMode: 'sandbox' },
+    projectRoot
+  );
+  assert.strictEqual(invalidMode.valid, false);
+  assert.ok(invalidMode.errors.some((e) => e.includes('"phoneMode" không hợp lệ')));
+
+  // 11.4: Chuẩn hóa đường dẫn phoneNumbersFile
+  const withFile = validateConfig(
+    {
+      startUrl: 'https://example.com',
+      profileDir: 'profiles/t',
+      phoneNumbersFile: 'data/phones.txt'
+    },
+    projectRoot
+  );
+  assert.strictEqual(withFile.valid, true);
+  assert.strictEqual(
+    withFile.config?.phoneNumbersFile,
+    path.resolve(projectRoot, 'data/phones.txt')
+  );
+
+  // 11.5: formatSafeConfig có chứa phoneMode và phoneNumbersFile
+  if (withFile.config) {
+    const safe = formatSafeConfig(withFile.config);
+    assert.strictEqual(safe.phoneMode, 'mock');
+    assert.strictEqual(safe.phoneNumbersFile, path.resolve(projectRoot, 'data/phones.txt'));
+  }
+
+  console.log('  ✔ Kiểm tra phoneMode, phoneNumbersFile và formatSafeConfig thành công.');
+}
+
 console.log('\n--- TẤT CẢ CÁC BÀI KIỂM TRA CẤU HÌNH ĐÃ VƯỢT QUA THÀNH CÔNG! ---');

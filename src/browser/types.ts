@@ -14,3 +14,11 @@ export interface PlaywrightProxyOptions {
   username?: string;
   password?: string;
 }
+
+export type ConnectionMode = 'direct' | 'proxy';
+
+export interface SwitchModeOptions {
+  checkUrl?: string;
+  expectedIp?: string;
+  timeoutMs?: number;
+}

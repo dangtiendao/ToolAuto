@@ -1,5 +1,5 @@
 import { loadConfig, formatSafeConfig, getProjectRoot } from './config';
-import { launchBrowser, closeBrowser, waitForEnter, BrowserSession } from './browser';
+import { BrowserManager, waitForEnter, BrowserSession } from './browser';
 import { getFlowOrThrow } from './flows';
 import { runFlow, FlowContext, FlowResult, saveFlowResult } from './runner';
 import { generateRunId, Logger, sanitizeUrl } from './utils';
@@ -16,6 +16,7 @@ async function main(): Promise<void> {
   logger.info(`Log file: ${logger.getLogFilePath()}`);
 
   const abortController = new AbortController();
+  let browserManager: BrowserManager | null = null;
   let session: BrowserSession | null = null;
   let flowResult: FlowResult | null = null;
   let isCleaningUp = false;
@@ -32,9 +33,10 @@ async function main(): Promise<void> {
       logger.warn('Nhận tín hiệu dừng (Ctrl+C). Đang ngắt kết nối trình duyệt và hủy luồng...');
     }
 
-    // Đóng browser context an toàn
-    if (session) {
-      await closeBrowser(session.context);
+    // Đóng browser context an toàn qua BrowserManager
+    if (browserManager) {
+      await browserManager.close();
+      browserManager = null;
       session = null;
       logger.info('Đã đóng trình duyệt an toàn.');
     }
@@ -75,9 +77,14 @@ async function main(): Promise<void> {
     const flow = getFlowOrThrow(config.flowName);
     logger.info(`Đã chọn luồng: "${flow.name}"`);
 
-    // 3. Khởi chạy Google Chrome
+    // 3. Khởi tạo Trình quản lý trình duyệt (BrowserManager)
+    browserManager = new BrowserManager(config, undefined, logger);
+    const initialMode = browserManager.getConnectionMode();
+    logger.info(`Chế độ kết nối ban đầu: "${initialMode}"`);
+
+    // 4. Khởi chạy Google Chrome theo cấu hình đã chọn
     logger.info(`Đang khởi chạy Google Chrome...`);
-    session = await launchBrowser(config);
+    session = await browserManager.initSession();
     logger.info(`Đã khởi chạy Chrome chính thức từ: ${session.executablePath || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'}`);
     logger.info(`Đường dẫn thư mục dữ liệu gốc (userDataDir): ${config.selectedProfile.userDataDir}`);
     logger.info(`Đường dẫn profile đầy đủ (Profile Path): ${config.selectedProfile.fullPath}`);
@@ -86,13 +93,14 @@ async function main(): Promise<void> {
       '(Lưu ý: Mở trang thành công xác nhận kết nối mạng/proxy tới URL ban đầu hoạt động, không phải là xác minh IP đầu ra).'
     );
 
-    // 4. Chuẩn bị Context và thực thi luồng
+    // 5. Chuẩn bị Context và thực thi luồng
     const flowContext: FlowContext = {
       page: session.page,
       config,
       runId,
       logger,
-      cancellationToken: abortController.signal
+      cancellationToken: abortController.signal,
+      browserManager
     };
 
     flowResult = await runFlow(flow, flowContext, projectRoot);
@@ -100,7 +108,7 @@ async function main(): Promise<void> {
     logger.info('Kết quả thực thi luồng:');
     logger.info(JSON.stringify(flowResult, null, 2));
 
-    // 5. Nếu không bị hủy, chờ người dùng nhấn Enter để đóng Chrome
+    // 6. Nếu không bị hủy, chờ người dùng nhấn Enter để đóng Chrome
     if (!isCancelledByUser && !abortController.signal.aborted) {
       await waitForEnter();
     }
@@ -128,7 +136,7 @@ async function main(): Promise<void> {
     await cleanup(false);
   }
 
-  // 6. Phân loại mã thoát theo quy định
+  // 7. Phân loại mã thoát theo quy định
   if (isCancelledByUser || flowResult?.status === 'cancelled') {
     process.exit(130);
   } else if (flowResult?.status === 'failed') {
