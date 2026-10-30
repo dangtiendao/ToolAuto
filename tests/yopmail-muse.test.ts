@@ -30,6 +30,7 @@ import {
   inputReenterPhoneOnTabC,
   clickNextSpanOnTabC,
   activateTabB,
+  reloadTabBThroughProxy,
   yopmailMuseFlow,
   generateMailboxName
 } from '../src/flows/yopmail-muse.flow';
@@ -915,7 +916,7 @@ async function runTests(): Promise<void> {
   // ==========================================
   // Test 17: Kiểm tra Flow Registry và cấu trúc 17 bước
   // ==========================================
-  console.log('\n17. Kiểm tra Flow Registry với luồng yopmail-muse (17 bước tuần tự):');
+  console.log('\n17. Kiểm tra Flow Registry với luồng yopmail-muse (24 bước tuần tự):');
   {
     const foundFlow = getFlow('yopmail-muse');
     assert.ok(foundFlow, 'Phải tìm thấy luồng yopmail-muse trong registry');
@@ -947,9 +948,11 @@ async function runTests(): Promise<void> {
       'tabC-click-add-mobile-number',
       'tabC-input-reenter-phone',
       'tabC-submit-next',
-      'tabB-activate'
+      'tabB-activate',
+      'tabB-enable-proxy',
+      'tabB-reload-proxy'
     ]);
-    console.log(`  ✔ Luồng đã đăng ký thành công với 22 bước tuần tự: [${stepIds.join(', ')}].`);
+    console.log(`  ✔ Luồng đã đăng ký thành công với 24 bước tuần tự: [${stepIds.join(', ')}].`);
   }
 
   // ==========================================
@@ -1027,10 +1030,18 @@ async function runTests(): Promise<void> {
       frames: () => []
     };
 
+    let tabBReloaded = false;
+    let tabBGotoCalled = false;
     const mockTabB: any = {
       isClosed: () => false,
       title: async () => 'Muse.ai',
-      goto: async () => {},
+      url: () => 'https://muse.ai/login',
+      goto: async () => {
+        tabBGotoCalled = true;
+      },
+      reload: async () => {
+        tabBReloaded = true;
+      },
       setDefaultTimeout: () => {},
       setDefaultNavigationTimeout: () => {},
       bringToFront: async () => {
@@ -1494,7 +1505,7 @@ async function runTests(): Promise<void> {
         flowName: 'yopmail-muse',
         screenshotOnError: false,
         initialConnectionMode: 'direct',
-        proxy: { enabled: false },
+        proxy: { enabled: false, server: 'http://103.82.25.199:14553' },
         phoneNumbersFile: path.resolve(projectRoot, 'phone-numbers.example.txt'),
         phoneMode: 'mock'
       },
@@ -1503,10 +1514,25 @@ async function runTests(): Promise<void> {
       data: {}
     };
 
+    let currentProxyMode = 'direct';
+    const mockBrowserManager: any = {
+      getConnectionMode: () => currentProxyMode,
+      switchConnectionMode: async (target: string) => {
+        currentProxyMode = target;
+      },
+      newPage: async (name: string) => {
+        return mockTabB;
+      },
+      registerPage: (name: string, page: any) => {},
+      getPage: (name: string) => mockTabB,
+      getCurrentPage: () => mockTabB
+    };
+    fullTestContext.browserManager = mockBrowserManager;
+
     const flowResult = await runFlow(yopmailMuseFlow, fullTestContext, projectRoot);
 
-    assert.strictEqual(flowResult.status, 'success', 'Luồng 22 bước phải chạy thành công');
-    assert.strictEqual(flowResult.completedSteps.length, 22, 'Phải hoàn thành đủ 22 bước tuần tự');
+    assert.strictEqual(flowResult.status, 'success', 'Luồng 24 bước phải chạy thành công');
+    assert.strictEqual(flowResult.completedSteps.length, 24, 'Phải hoàn thành đủ 24 bước tuần tự');
     assert.strictEqual(continueBtnClicked, true, 'Nút tiếp tục trên TabB phải được bấm');
     assert.strictEqual(tabCCreated, true, 'TabC phải được tạo trong cùng browser context');
     assert.strictEqual(tabCClickedTwoFactor, true, 'Phải click Xác thực 2 yếu tố trên TabC');
@@ -1522,7 +1548,8 @@ async function runTests(): Promise<void> {
     assert.strictEqual(tabCReenteredPhone, tabCPhoneEntered, 'Số điện thoại nhập lại phải trùng khớp với số đã chọn');
     assert.strictEqual(tabCNextClickedAfterReenter, true, 'Phải click Next trên TabC sau khi nhập lại số');
     assert.strictEqual(tabBBroughtToFrontAfterC, true, 'Phải kích hoạt lại TabB làm tab hiện hành sau khi xong TabC');
-    console.log('  ✔ Toàn bộ 22 bước của luồng yopmail-muse đã chạy tuần tự qua Sequential Runner thành công 100%.');
+    assert.strictEqual(tabBGotoCalled || tabBReloaded, true, 'TabB phải được tải lại qua proxy');
+    console.log('  ✔ Toàn bộ 24 bước của luồng yopmail-muse đã chạy tuần tự qua Sequential Runner thành công 100%.');
   }
 
   // ==========================================
@@ -2854,6 +2881,372 @@ async function runTests(): Promise<void> {
     }
     assert.strictEqual(closedTabBCaught, true, 'Phải báo lỗi khi TabB đã bị đóng');
     console.log('  ✔ Báo lỗi chính xác khi TabB đã bị đóng.');
+  }
+
+  // ==========================================
+  // Test 36: Kiểm tra chuyển về TabB, bật proxy và tải lại trang TabB qua proxy (reloadTabBThroughProxy)
+  // ==========================================
+  console.log('\n36. Kiểm tra chuyển về TabB, bật proxy và tải lại trang TabB qua proxy (reloadTabBThroughProxy):');
+  {
+    // 36.1: activateTabB lưu URL hợp lệ, bảo mật loại bỏ query string khỏi log
+    let capturedLogs: string[] = [];
+    const memoryLogger: any = {
+      info: (msg: string) => capturedLogs.push(msg),
+      warn: (msg: string) => capturedLogs.push(msg),
+      error: (msg: string) => capturedLogs.push(msg)
+    };
+
+    const mockTabBWithQuery: any = {
+      isClosed: () => false,
+      url: () => 'https://muse.ai/workspace?token=SECRET_SESSION_TOKEN&user=12345',
+      bringToFront: async () => {}
+    };
+
+    const savedUrl = await activateTabB({
+      pageB: mockTabBWithQuery,
+      stepName: 'test-save-url',
+      logger: memoryLogger
+    });
+
+    assert.strictEqual(
+      savedUrl,
+      'https://muse.ai/workspace?token=SECRET_SESSION_TOKEN&user=12345',
+      'Phải lưu đầy đủ URL để goto() sau restart'
+    );
+    // Kiểm tra log không chứa query string nhạy cảm
+    const logContainsSecret = capturedLogs.some((l) => l.includes('SECRET_SESSION_TOKEN') || l.includes('token='));
+    assert.strictEqual(logContainsSecret, false, 'Log tuyệt đối không được chứa query string hoặc dữ liệu nhạy cảm');
+    console.log('  ✔ Lưu URL TabB hợp lệ và bảo mật query string khỏi log thành công.');
+
+    // 36.2: activateTabB từ chối URL không hợp lệ (không phải http/https)
+    let invalidProtocolCaught = false;
+    const mockTabBInvalidProtocol: any = {
+      isClosed: () => false,
+      url: () => 'file:///C:/Users/test/page.html',
+      bringToFront: async () => {}
+    };
+
+    try {
+      await activateTabB({
+        pageB: mockTabBInvalidProtocol,
+        stepName: 'test-invalid-protocol'
+      });
+    } catch (err: any) {
+      if (err.message.includes('[LỖI URL TAB B] URL của TabB không sử dụng giao thức http hoặc https')) {
+        invalidProtocolCaught = true;
+      }
+    }
+    assert.strictEqual(invalidProtocolCaught, true, 'Phải từ chối URL không phải giao thức http hoặc https');
+    console.log('  ✔ Từ chối URL không phải http/https thành công.');
+
+    // 36.3: reloadTabBThroughProxy - Trường hợp Chrome vừa restart:
+    // - Không gọi reload() hoặc bringToFront() trên TabB cũ đã đóng.
+    // - Tạo Page mới trong context mới qua bm.newPage('TabB').
+    // - Đăng ký lại Page này dưới tên TabB qua bm.registerPage('TabB', newPage).
+    // - Truy cập tabBUrl bằng goto() với waitUntil: 'domcontentloaded'.
+    // - Đưa TabB mới lên trước bằng bringToFront().
+    // - In thông báo: "Đã bật chế độ proxy và tải lại trang TabB."
+    let oldTabBReloadCalled = false;
+    let oldTabBBringToFrontCalled = false;
+    const mockClosedOldTabB: any = {
+      isClosed: () => true,
+      reload: async () => {
+        oldTabBReloadCalled = true;
+      },
+      bringToFront: async () => {
+        oldTabBBringToFrontCalled = true;
+      }
+    };
+
+    let newTabBCreated = false;
+    let registeredTabBName = '';
+    let gotoUrlCalled = '';
+    let gotoWaitUntil = '';
+    let newTabBBroughtToFront = false;
+
+    const mockNewPageB: any = {
+      isClosed: () => false,
+      goto: async (url: string, opts?: any) => {
+        gotoUrlCalled = url;
+        gotoWaitUntil = opts?.waitUntil;
+      },
+      bringToFront: async () => {
+        newTabBBroughtToFront = true;
+      },
+      title: async () => 'Muse.ai - Workspace',
+      locator: () => ({ count: async () => 0 })
+    };
+
+    const mockBMRestarted: any = {
+      newPage: async (name: string) => {
+        newTabBCreated = true;
+        return mockNewPageB;
+      },
+      registerPage: (name: string, p: any) => {
+        registeredTabBName = name;
+      },
+      getPage: (name: string) => undefined
+    };
+
+    const consoleLogsRestart: string[] = [];
+    const origLog = console.log;
+    console.log = (msg: string) => {
+      consoleLogsRestart.push(msg);
+      origLog(msg);
+    };
+
+    let returnedTabB: any;
+    try {
+      returnedTabB = await reloadTabBThroughProxy({
+        browserManager: mockBMRestarted,
+        tabBUrl: 'https://muse.ai/workspace',
+        existingTabB: mockClosedOldTabB,
+        stepName: 'test-reload-restart',
+        timeoutMs: 10000,
+        logger: memoryLogger
+      });
+    } finally {
+      console.log = origLog;
+    }
+
+    assert.strictEqual(oldTabBReloadCalled, false, 'Không được gọi reload() trên TabB cũ sau khi restart');
+    assert.strictEqual(oldTabBBringToFrontCalled, false, 'Không được gọi bringToFront() trên TabB cũ sau khi restart');
+    assert.strictEqual(newTabBCreated, true, 'Phải tạo Page mới trong context mới qua newPage');
+    assert.strictEqual(registeredTabBName, 'TabB', 'Phải đăng ký Page mới dưới tên TabB trong bộ quản lý tab');
+    assert.strictEqual(gotoUrlCalled, 'https://muse.ai/workspace', 'Phải truy cập đúng tabBUrl bằng goto()');
+    assert.strictEqual(gotoWaitUntil, 'domcontentloaded', 'Goto phải sử dụng waitUntil: "domcontentloaded"');
+    assert.strictEqual(newTabBBroughtToFront, true, 'Phải đưa TabB mới lên trước bằng bringToFront()');
+    assert.strictEqual(returnedTabB, mockNewPageB, 'Kết quả trả về phải là đối tượng Page mới');
+    assert.ok(
+      consoleLogsRestart.some((m) => m.includes('Đã bật chế độ proxy và tải lại trang TabB.')),
+      'Phải thông báo chính xác "Đã bật chế độ proxy và tải lại trang TabB."'
+    );
+    console.log('  ✔ Trường hợp Chrome vừa restart: tạo TabB mới, đăng ký lại và truy cập URL thành công 100%.');
+
+    // 36.4: reloadTabBThroughProxy - Trường hợp proxy đã bật và Chrome không restart:
+    // - Dùng TabB hiện tại.
+    // - Gọi TabB.reload() với waitUntil: 'domcontentloaded'.
+    // - Đưa TabB hiện tại lên trước bằng bringToFront().
+    // - Không tạo Tab mới trong BrowserManager.
+    let currentTabBReloaded = false;
+    let reloadWaitUntil = '';
+    let currentTabBBroughtToFront = false;
+    let bmNewPageCalled = false;
+
+    const mockAliveTabB: any = {
+      isClosed: () => false,
+      reload: async (opts?: any) => {
+        currentTabBReloaded = true;
+        reloadWaitUntil = opts?.waitUntil;
+      },
+      bringToFront: async () => {
+        currentTabBBroughtToFront = true;
+      },
+      title: async () => 'Muse.ai - Active',
+      locator: () => ({ count: async () => 0 })
+    };
+
+    const mockBMNoRestart: any = {
+      newPage: async () => {
+        bmNewPageCalled = true;
+        return {};
+      }
+    };
+
+    const consoleLogsNoRestart: string[] = [];
+    console.log = (msg: string) => {
+      consoleLogsNoRestart.push(msg);
+      origLog(msg);
+    };
+
+    let returnedTabBNoRestart: any;
+    try {
+      returnedTabBNoRestart = await reloadTabBThroughProxy({
+        browserManager: mockBMNoRestart,
+        tabBUrl: 'https://muse.ai/workspace',
+        existingTabB: mockAliveTabB,
+        stepName: 'test-reload-no-restart',
+        timeoutMs: 10000,
+        logger: memoryLogger
+      });
+    } finally {
+      console.log = origLog;
+    }
+
+    assert.strictEqual(bmNewPageCalled, false, 'Không được tạo Tab mới khi Chrome không restart');
+    assert.strictEqual(currentTabBReloaded, true, 'Phải gọi reload() trên TabB hiện tại');
+    assert.strictEqual(reloadWaitUntil, 'domcontentloaded', 'Reload phải sử dụng waitUntil: "domcontentloaded"');
+    assert.strictEqual(currentTabBBroughtToFront, true, 'Phải đưa TabB hiện tại lên trước bằng bringToFront()');
+    assert.strictEqual(returnedTabBNoRestart, mockAliveTabB, 'Phải giữ nguyên đối tượng TabB hiện tại');
+    assert.ok(
+      consoleLogsNoRestart.some((m) => m.includes('Đã bật chế độ proxy và tải lại trang TabB.')),
+      'Phải thông báo chính xác "Đã bật chế độ proxy và tải lại trang TabB."'
+    );
+    console.log('  ✔ Trường hợp proxy đã bật và không restart: reload TabB hiện tại thành công 100%.');
+
+    // 36.5: Kiểm tra bước tabB-enable-proxy dừng ngay khi thiếu server cấu hình proxy
+    const enableProxyStep = yopmailMuseFlow.steps.find((s) => s.id === 'tabB-enable-proxy')!;
+    assert.ok(enableProxyStep, 'Phải có bước tabB-enable-proxy trong yopmailMuseFlow');
+
+    let missingServerCaught = false;
+    const mockContextMissingProxy: any = {
+      browserManager: {
+        getConnectionMode: () => 'direct',
+        switchConnectionMode: async () => {}
+      },
+      config: {
+        flowName: 'yopmail-muse',
+        proxy: { enabled: false, server: '' } // server rỗng
+      },
+      logger: memoryLogger,
+      data: {}
+    };
+
+    try {
+      await enableProxyStep.execute(mockContextMissingProxy);
+    } catch (err: any) {
+      if (err.message.includes('[LỖI CẤU HÌNH PROXY]')) {
+        missingServerCaught = true;
+      }
+    }
+    assert.strictEqual(missingServerCaught, true, 'Phải dừng ngay khi thiếu proxy.server, không fallback sang direct');
+    console.log('  ✔ Bước tabB-enable-proxy dừng an toàn và không fallback khi thiếu proxy server.');
+
+    // 36.6: Kiểm tra tabB-enable-proxy vô hiệu hóa tham chiếu Page/Context cũ khi restart
+    let switchedToMode = '';
+    const mockContextRestart: any = {
+      browserManager: {
+        getConnectionMode: () => 'direct',
+        switchConnectionMode: async (m: string) => {
+          switchedToMode = m;
+        },
+        getPage: () => undefined
+      },
+      config: {
+        flowName: 'yopmail-muse',
+        proxy: { enabled: true, server: 'http://103.82.25.199:14553' }
+      },
+      logger: memoryLogger,
+      data: {
+        tabA: { isClosed: () => true },
+        tabB: { isClosed: () => true },
+        tabC: { isClosed: () => true }
+      }
+    };
+
+    await enableProxyStep.execute(mockContextRestart);
+    assert.strictEqual(switchedToMode, 'proxy', 'Phải chuyển kết nối sang proxy');
+    assert.strictEqual(mockContextRestart.data.tabA, undefined, 'tabA cũ phải bị vô hiệu hóa (undefined)');
+    assert.strictEqual(mockContextRestart.data.tabC, undefined, 'tabC cũ phải bị vô hiệu hóa (undefined)');
+    assert.strictEqual(mockContextRestart.data.tabB, undefined, 'tabB cũ phải bị vô hiệu hóa (undefined)');
+    console.log('  ✔ Vô hiệu hóa toàn bộ tham chiếu Page cũ sau khi restart Chrome thành công.');
+
+    // 36.7: reloadTabBThroughProxy phát hiện CAPTCHA / Security Verification và dừng an toàn
+    let captchaDetected = false;
+    const mockCaptchaPage: any = {
+      isClosed: () => false,
+      title: async () => 'Security Verification',
+      reload: async () => {},
+      bringToFront: async () => {},
+      locator: () => ({ count: async () => 0 })
+    };
+
+    try {
+      await reloadTabBThroughProxy({
+        browserManager: mockBMNoRestart,
+        tabBUrl: 'https://muse.ai/workspace',
+        existingTabB: mockCaptchaPage,
+        stepName: 'test-captcha-tabB',
+        timeoutMs: 5000,
+        logger: memoryLogger
+      });
+    } catch (err: any) {
+      if (err.message.includes('[YÊU CẦU XÁC MINH]')) {
+        captchaDetected = true;
+      }
+    }
+    assert.strictEqual(captchaDetected, true, 'Phải dừng khi phát hiện trang xác minh, không tự vượt');
+    console.log('  ✔ Dừng an toàn để người dùng xử lý thủ công khi gặp xác minh trên TabB.');
+
+    // 36.8: Kiểm tra Giải pháp 2 trong BrowserManager (chuyển đổi proxy ẩn danh không tắt Chrome và đồng bộ cookies)
+    let browserClosed = false;
+    let newContextProxyOption: any = null;
+    let addedCookiesToNewContext: any[] = [];
+    let oldContextClosed = false;
+
+    const mockOldContext: any = {
+      cookies: async () => [
+        { name: 'muse_session', value: 'secret_session_token_123', domain: 'muse.ai', path: '/' }
+      ],
+      close: async () => {
+        oldContextClosed = true;
+      }
+    };
+
+    const mockNewContext: any = {
+      setDefaultTimeout: () => {},
+      setDefaultNavigationTimeout: () => {},
+      addCookies: async (cookies: any[]) => {
+        addedCookiesToNewContext = cookies;
+      },
+      newPage: async () => ({
+        setDefaultTimeout: () => {},
+        setDefaultNavigationTimeout: () => {},
+        isClosed: () => false
+      }),
+      request: {
+        get: async () => ({
+          ok: () => true,
+          status: () => 200,
+          text: async () => '{"origin": "103.82.25.199"}'
+        })
+      }
+    };
+
+    const mockBrowserInstance: any = {
+      isConnected: () => true,
+      newContext: async (opts: any) => {
+        newContextProxyOption = opts?.proxy;
+        return mockNewContext;
+      },
+      close: async () => {
+        browserClosed = true;
+      }
+    };
+
+    const incognitoConfig: any = {
+      flowName: 'yopmail-muse',
+      incognito: true,
+      initialConnectionMode: 'direct',
+      actionTimeoutMs: 5000,
+      navigationTimeoutMs: 10000,
+      proxy: {
+        enabled: false,
+        server: 'http://103.82.25.199:14553'
+      },
+      selectedProfile: { profileName: 'Incognito' }
+    };
+
+    const initialIncognitoSession: any = {
+      browser: mockBrowserInstance,
+      context: mockOldContext,
+      page: { isClosed: () => false },
+      isIncognito: true
+    };
+
+    const { BrowserManager: BMClass } = await import('../src/browser/manager');
+    const incognitoBM = new BMClass(incognitoConfig, initialIncognitoSession, memoryLogger);
+
+    const switchedSession = await incognitoBM.switchConnectionMode('proxy');
+
+    assert.strictEqual(browserClosed, false, 'Cửa sổ trình duyệt Chrome không được phép đóng');
+    assert.strictEqual(oldContextClosed, true, 'Context direct cũ phải được đóng sau khi context mới sẵn sàng');
+    assert.ok(newContextProxyOption, 'Context mới phải có cấu hình proxy');
+    assert.strictEqual(newContextProxyOption.server, 'http://103.82.25.199:14553');
+    assert.strictEqual(addedCookiesToNewContext.length, 1, 'Cookies của phiên ẩn danh cũ phải được đồng bộ sang context mới');
+    assert.strictEqual(addedCookiesToNewContext[0].name, 'muse_session');
+    assert.strictEqual(incognitoBM.getConnectionMode(), 'proxy');
+    console.log('  ✔ Giải pháp 2: Chuyển đổi proxy ẩn danh không tắt Chrome và đồng bộ cookies thành công 100%.');
   }
 
   console.log('\n--- TẤT CẢ BÀI KIỂM TRA LUỒNG YOPMAIL-MUSE (TÍCH HỢP TEMP-MAIL) ĐÃ VƯỢT QUA! ---');

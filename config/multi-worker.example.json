@@ -1,0 +1,11 @@
+{
+  "browserMode": "incognito",
+  "maxConcurrency": 2,
+  "jobs": [
+    {
+      "id": "demo-01",
+      "flowName": "multi-tab-demo",
+      "connectionMode": "direct"
+    }
+  ]
+}

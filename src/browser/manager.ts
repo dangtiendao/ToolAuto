@@ -89,6 +89,29 @@ export class BrowserManager {
   }
 
   /**
+   * Đăng ký một Page cụ thể vào bộ quản lý tab với tên định danh.
+   */
+  public registerPage(name: string, page: Page): void {
+    this.activePages.set(name, page);
+    if (this.session) {
+      this.session.page = page;
+    }
+    this.logger?.info(`Đã đăng ký tab [${name}] vào bộ quản lý tab.`, { flow: this.config.flowName });
+  }
+
+  /**
+   * Lấy Page theo tên định danh từ bộ quản lý tab (nếu còn mở).
+   */
+  public getPage(name: string): Page | undefined {
+    const page = this.activePages.get(name);
+    if (page && typeof page.isClosed === 'function' && page.isClosed()) {
+      this.activePages.delete(name);
+      return undefined;
+    }
+    return page;
+  }
+
+  /**
    * Khởi chạy Google Chrome theo cấu hình đã chọn (Incognito hoặc Persistent Context).
    */
   public async initSession(): Promise<BrowserSession> {
@@ -125,14 +148,149 @@ export class BrowserManager {
       );
     }
 
-    // 2. Nếu chế độ yêu cầu đã đang hoạt động: Không restart Chrome
-    if (targetMode === this.currentMode && this.session && !this.session.page.isClosed()) {
+    // 2. Nếu chế độ yêu cầu đã đang hoạt động: Không restart Chrome (no-op)
+    if (targetMode === this.currentMode) {
       const msg = `Chế độ kết nối không thay đổi (hiện tại: "${this.currentMode}"). Bỏ qua thao tác khởi động lại Chrome.`;
       this.logger?.info(msg, { flow: this.config.flowName });
-      return this.session;
+      return this.session!;
     }
 
-    // 3. Kiểm tra cấu hình chế độ đích TRƯỚC khi đóng Chrome
+    // 2.1. Kiểm tra cấu hình chế độ đích TRƯỚC khi thực hiện
+    if (targetMode === 'proxy') {
+      const server = this.config.proxy?.server?.trim();
+      if (!server) {
+        throw new Error(
+          '[LỖI CẤU HÌNH PROXY] Không thể chuyển sang chế độ proxy vì "proxy.server" chưa được cấu hình.\n' +
+          'Phiên trình duyệt hiện tại được giữ nguyên vẹn không đóng.'
+        );
+      }
+
+      // Kiểm tra tính hợp lệ của giao thức proxy
+      try {
+        buildPlaywrightProxy(this.config.proxy);
+      } catch (validationErr) {
+        throw new Error(
+          `[LỖI CẤU HÌNH PROXY] Cấu hình proxy không hợp lệ: ${(validationErr as Error).message}\n` +
+          'Phiên trình duyệt hiện tại được giữ nguyên vẹn không đóng.'
+        );
+      }
+    }
+
+    // 2.2. Xử lý chuyển đổi proxy cho phiên ẩn danh (Incognito) - Giải pháp 2:
+    // Giữ nguyên cửa sổ trình duyệt Chrome, tạo BrowserContext mới với proxy và đồng bộ cookie phiên làm việc
+    const isIncognitoMode = Boolean(this.config.incognito || this.session?.isIncognito);
+    if (isIncognitoMode) {
+      if (this.session?.browser && this.session.browser.isConnected()) {
+        this.isSwitching = true;
+        this.logger?.info(
+          `[CHUYỂN PROXY ẨN DANH] Giữ nguyên cửa sổ Chrome, tạo context mới với kết nối "${targetMode}" và đồng bộ cookie phiên làm việc...`,
+          { flow: this.config.flowName }
+        );
+
+        const oldContext = this.session.context;
+        let oldCookies: any[] = [];
+        try {
+          oldCookies = await oldContext.cookies();
+        } catch {
+          // bỏ qua nếu không đọc được cookie
+        }
+
+        const proxyOption =
+          targetMode === 'proxy' && this.config.proxy?.server
+            ? buildPlaywrightProxy(this.config.proxy)
+            : undefined;
+
+        let newContext;
+        try {
+          newContext = await this.session.browser.newContext({
+            viewport: null,
+            proxy: proxyOption
+          });
+          newContext.setDefaultTimeout(this.config.actionTimeoutMs);
+          newContext.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+
+          if (oldCookies && oldCookies.length > 0) {
+            await newContext.addCookies(oldCookies).catch(() => {});
+          }
+        } catch (err) {
+          this.isSwitching = false;
+          throw new Error(
+            `[LỖI CHUYỂN CHẾ ĐỘ ẨN DANH] Không thể tạo context mới với proxy: ${(err as Error).message}`
+          );
+        }
+
+        const newPage = await newContext.newPage();
+        newPage.setDefaultTimeout(this.config.actionTimeoutMs);
+        newPage.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
+
+        // Đóng context cũ sau khi context mới đã sẵn sàng
+        try {
+          await oldContext.close();
+        } catch {
+          // bỏ qua
+        }
+
+        this.activePages.clear();
+        this.activePages.set('default', newPage);
+
+        const newSession: BrowserSession = {
+          browser: this.session.browser,
+          context: newContext,
+          page: newPage,
+          executablePath: this.session.executablePath,
+          isCdp: false,
+          isIncognito: true
+        };
+
+        // Kiểm tra kết nối từ context mới nếu được cấu hình
+        const checkUrl = options?.checkUrl || this.config.proxyCheckUrl || this.config.startUrl || 'https://www.google.com';
+        this.logger?.info(
+          `[KIỂM TRA KẾT NỐI] Đang kiểm tra kết nối từ context Chrome mới tới: ${sanitizeUrl(checkUrl)}...`,
+          { flow: this.config.flowName }
+        );
+
+        try {
+          const timeoutMs = options?.timeoutMs || this.config.navigationTimeoutMs;
+          const response = await newSession.context.request.get(checkUrl, {
+            timeout: timeoutMs
+          });
+
+          if (!response.ok()) {
+            throw new Error(
+              `URL kiểm tra phản hồi với mã trạng thái HTTP ${response.status()} ${response.statusText()}`
+            );
+          }
+        } catch (checkErr) {
+          // Đóng context mới nếu kết nối thất bại
+          await newContext.close().catch(() => {});
+          this.isSwitching = false;
+          throw new Error(
+            `[LỖI KẾT NỐI] Kiểm tra kết nối trong context Chrome mới ở chế độ "${targetMode}" thất bại:\n` +
+            `  -> URL kiểm tra: ${sanitizeUrl(checkUrl)}\n` +
+            `  -> Chi tiết lỗi: ${(checkErr as Error).message}\n` +
+            `Quy tắc an toàn: Dừng luồng ngay lập tức, tuyệt đối KHÔNG tự động fallback sang kết nối trực tiếp.`
+          );
+        }
+
+        this.currentMode = targetMode;
+        this.session = newSession;
+        this.isSwitching = false;
+
+        this.logger?.info(
+          `[CHUYỂN CHẾ ĐỘ THÀNH CÔNG] Đã chuyển sang chế độ "${targetMode}" trong phiên ẩn danh (giữ nguyên cửa sổ Chrome và cookie).`,
+          { flow: this.config.flowName }
+        );
+
+        return this.session;
+      }
+
+      throw new Error(
+        '[CHẶN ĐỔI CHẾ ĐỘ] Chưa hỗ trợ đổi proxy giữa phiên ẩn danh; đóng phiên có thể làm mất đăng nhập và trạng thái tab.\n' +
+        'Để dùng proxy ở phiên ẩn danh, vui lòng khởi động ngay từ đầu với cấu hình proxy.enabled: true.'
+      );
+    }
+
+    // 3. Kiểm tra cấu hình chế độ đích TRƯỚC khi đóng Chrome (cho Persistent Context)
     if (targetMode === 'proxy') {
       const server = this.config.proxy?.server?.trim();
       if (!server) {
@@ -207,7 +365,7 @@ export class BrowserManager {
     }
 
     // 7. Kiểm tra kết nối trong context mới bằng chính network stack của Chrome
-    const checkUrl = options?.checkUrl || this.config.proxyCheckUrl || this.config.startUrl;
+    const checkUrl = options?.checkUrl || this.config.proxyCheckUrl || this.config.startUrl || 'https://www.google.com';
     this.logger?.info(
       `[KIỂM TRA KẾT NỐI] Đang kiểm tra kết nối từ context Chrome mới tới: ${sanitizeUrl(checkUrl)}...`,
       { flow: this.config.flowName }
@@ -477,4 +635,19 @@ export function disableProxy(
   options?: SwitchModeOptions
 ): Promise<BrowserSession> {
   return manager.disableProxy(options);
+}
+
+export function registerPage(
+  manager: BrowserManager,
+  name: string,
+  page: Page
+): void {
+  manager.registerPage(name, page);
+}
+
+export function getPage(
+  manager: BrowserManager,
+  name: string
+): Page | undefined {
+  return manager.getPage(name);
 }

@@ -24,6 +24,7 @@ import { sanitizeUrl } from '../utils/sanitize';
 export const proxySwitchDemoFlow: Flow = {
   name: 'proxy-switch-demo',
   description: 'Luồng demo bật/tắt proxy bằng cách đóng và mở lại Chrome cùng profile đã chọn',
+  supportsConcurrency: false,
   steps: [
     // 1. Đảm bảo chế độ direct
     {

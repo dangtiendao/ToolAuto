@@ -2,6 +2,8 @@ import { Page } from 'playwright';
 import { AppConfig } from '../config/types';
 import { Logger } from '../utils/logger';
 import type { BrowserManager } from '../browser/manager';
+import type { TabManager } from '../worker/tab-manager';
+import type { WorkerRuntime } from '../worker/types';
 
 export interface CancellationToken {
   readonly isCancelled: boolean;
@@ -15,6 +17,10 @@ export interface FlowContext {
   cancellationToken?: AbortSignal | CancellationToken;
   data?: Record<string, unknown>;
   browserManager?: BrowserManager;
+  workerId?: string;
+  jobId?: string;
+  tabManager?: TabManager;
+  runtime?: WorkerRuntime;
 }
 
 export interface Step {
@@ -28,6 +34,7 @@ export interface Flow {
   name: string;
   description?: string;
   steps: Step[];
+  supportsConcurrency?: boolean;
 }
 
 export type FlowStatus = 'success' | 'failed' | 'cancelled';

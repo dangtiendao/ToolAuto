@@ -3,6 +3,7 @@ import * as readline from 'readline';
 import { Flow, FlowContext, CancellationToken } from '../runner/types';
 import { isCancelled } from '../runner';
 import { Logger } from '../utils/logger';
+import { sanitizeUrl } from '../utils/sanitize';
 import {
   readPhoneNumbersFromFile,
   selectRandomPhone,
@@ -59,6 +60,9 @@ export interface YopmailMuseState {
   reenteredPhone?: string;
   tabCNextSubmitted?: boolean;
   tabBReactivated?: boolean;
+  tabBUrl?: string;
+  proxyEnabled?: boolean;
+  tabBReloaded?: boolean;
 }
 
 /**
@@ -396,7 +400,12 @@ export async function waitForSingleMatchingElement(options: WaitForElementOption
           }
         } else if (role === 'clickable') {
           const isEnabled = await target.isEnabled().catch(() => false);
-          if (isEnabled) {
+          let isAriaDisabled = false;
+          if (typeof target.getAttribute === 'function') {
+            const ariaVal = await target.getAttribute('aria-disabled').catch(() => null);
+            isAriaDisabled = ariaVal === 'true';
+          }
+          if (isEnabled && !isAriaDisabled) {
             return target;
           }
         } else {
@@ -1962,21 +1971,21 @@ export async function selectBirthYear(options: {
 }
 
 export const MUSE_WAITLIST_SELECTORS = [
-  'text="Tham gia danh sách chờ Muse"',
-  'text="Join the waitlist for Muse"',
-  'text=/Tham\\s+gia\\s+danh\\s+sách\\s+chờ\\s+Muse/i',
-  'text=/Join\\s+the\\s+waitlist\\s+for\\s+Muse/i',
-  'text=/Join\\s+(?:the\\s+)?waitlist/i',
-  ':has-text("Tham gia danh sách chờ Muse")',
-  ':has-text("Join the waitlist for Muse")',
-  ':has-text("Join the Muse waitlist")',
-  ':has-text("Join the waitlist")',
-  'h1:has-text("Tham gia danh sách chờ Muse")',
   'h1:has-text("Join the waitlist for Muse")',
-  'h1:has-text("Join the waitlist")',
-  'h2:has-text("Tham gia danh sách chờ Muse")',
+  'h1:has-text("Tham gia danh sách chờ Muse")',
+  'text="Join the waitlist for Muse"',
+  'text="Tham gia danh sách chờ Muse"',
   'h2:has-text("Join the waitlist for Muse")',
+  'h2:has-text("Tham gia danh sách chờ Muse")',
+  ':has-text("Join the waitlist for Muse")',
+  ':has-text("Tham gia danh sách chờ Muse")',
+  ':has-text("Join the waitlist")',
+  'h1:has-text("Join the waitlist")',
   'h2:has-text("Join the waitlist")',
+  'text=/Join\\s+the\\s+waitlist\\s+for\\s+Muse/i',
+  'text=/Tham\\s+gia\\s+danh\\s+sách\\s+chờ\\s+Muse/i',
+  'text=/Join\\s+(?:the\\s+)?waitlist/i',
+  ':has-text("Join the Muse waitlist")',
   'h3:has-text("Tham gia danh sách chờ Muse")',
   'h3:has-text("Join the waitlist for Muse")',
   'p:has-text("Tham gia danh sách chờ Muse")',
@@ -1999,7 +2008,7 @@ export async function waitForMuseWaitlistScreen(options: {
 }): Promise<void> {
   const { page, stepName, timeoutMs, cancellationToken, logger } = options;
   const startTime = Date.now();
-  const pollIntervalMs = 200;
+  const pollIntervalMs = 100;
 
   logger?.info('TabB: Đang chờ hiển thị "Tham gia danh sách chờ Muse" / "Join the waitlist for Muse" trước khi mở TabC...', {
     flow: 'yopmail-muse',
@@ -2184,18 +2193,7 @@ export async function submitProfileBirthday(options: {
   logger?.info(`TabB: Đang click nút "${continueSelector}" đúng một lần...`, { flow: 'yopmail-muse', step: stepName });
   await continueBtn.click();
 
-  // Đợi request trang B load xong sau khi bấm tiếp tục
-  logger?.info('TabB: Đang đợi request và mạng của trang B tải xong sau khi bấm tiếp tục...', { flow: 'yopmail-muse', step: stepName });
-  if (typeof page.waitForLoadState === 'function') {
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-      await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
-    } catch {
-      // Bỏ qua timeout nếu trang duy trì websocket/long-polling
-    }
-  }
-
-  // Chờ hiển thị "Tham gia danh sách chờ Muse" trên Tab B
+  // Chờ hiển thị "Tham gia danh sách chờ Muse" / "Join the waitlist for Muse" trên Tab B ngay lập tức (không dùng networkidle gây delay treo 15s)
   await waitForMuseWaitlistScreen({
     page,
     stepName,
@@ -3440,14 +3438,16 @@ export async function clickNextSpanOnTabC(options: {
 /**
  * Quay lại kích hoạt TabB làm tab hiện hành (bring to front):
  * - Kiểm tra TabB phải tồn tại và chưa bị đóng.
+ * - Trích xuất và kiểm tra URL hiện tại của TabB (phải là http hoặc https hợp lệ).
+ * - Không ghi query string hoặc URL chứa dữ liệu nhạy cảm vào log.
  * - Gọi tabB.bringToFront() để hiển thị TabB lên foreground.
- * - Ghi log thông báo.
+ * - Trả về URL hợp lệ để lưu vào state.tabBUrl.
  */
 export async function activateTabB(options: {
   pageB: Page;
   stepName: string;
   logger?: Logger;
-}): Promise<void> {
+}): Promise<string> {
   const { pageB, stepName, logger } = options;
 
   if (!pageB || (typeof pageB.isClosed === 'function' && pageB.isClosed())) {
@@ -3456,7 +3456,31 @@ export async function activateTabB(options: {
     );
   }
 
-  logger?.info('TabB: Đang kích hoạt TabB làm tab hiện hành (bringToFront)...', { flow: 'yopmail-muse', step: stepName });
+  // Lấy URL hiện tại của TabB
+  const rawUrl = typeof pageB.url === 'function' ? pageB.url() : 'https://muse.ai';
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error(`[LỖI URL TAB B] URL của TabB không được để trống. Bước: "${stepName}".`);
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl.trim());
+  } catch {
+    throw new Error(`[LỖI URL TAB B] URL của TabB không hợp lệ: "${sanitizeUrl(rawUrl)}". Bước: "${stepName}".`);
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error(
+      `[LỖI URL TAB B] URL của TabB không sử dụng giao thức http hoặc https ("${parsedUrl.protocol}"). Bước: "${stepName}".`
+    );
+  }
+
+  // Không ghi query string hoặc dữ liệu nhạy cảm vào log
+  const safeUrlForLog = `${parsedUrl.origin}${parsedUrl.pathname}`;
+  logger?.info(`TabB: Đang kích hoạt TabB làm tab hiện hành (bringToFront) tại URL: ${safeUrlForLog}...`, {
+    flow: 'yopmail-muse',
+    step: stepName
+  });
 
   if (typeof pageB.bringToFront === 'function') {
     await pageB.bringToFront();
@@ -3465,6 +3489,143 @@ export async function activateTabB(options: {
   const completionMsg = 'TabB: Đã quay lại và kích hoạt TabB làm tab hiện hành (UI foreground).';
   logger?.info(completionMsg, { flow: 'yopmail-muse', step: stepName });
   console.log(completionMsg);
+
+  return rawUrl.trim();
+}
+
+export interface ReloadTabBOptions {
+  browserManager?: any;
+  tabBUrl: string;
+  existingTabB?: Page;
+  stepName: string;
+  timeoutMs: number;
+  logger?: Logger;
+  flowName?: string;
+}
+
+/**
+ * Tải lại trang TabB qua proxy theo đúng yêu cầu:
+ * - Trường hợp Chrome vừa restart:
+ *   + Không gọi reload() hoặc bringToFront() trên TabB cũ.
+ *   + Tạo Page mới trong context mới.
+ *   + Đăng ký lại Page này dưới tên TabB trong bộ quản lý tab.
+ *   + Truy cập tabBUrl bằng goto(..., { waitUntil: 'domcontentloaded' }).
+ *   + Không tự khôi phục TabA hoặc TabC.
+ *   + Không tự phát lại click, POST hoặc biểu mẫu.
+ *   + Đưa TabB hiện tại lên trước bằng bringToFront().
+ * - Trường hợp proxy đã bật và Chrome không restart:
+ *   + Dùng TabB hiện tại.
+ *   + Gọi TabB.reload({ waitUntil: 'domcontentloaded' }).
+ *   + Không dùng phím F5 hệ điều hành.
+ *   + Đưa TabB hiện tại lên trước bằng bringToFront().
+ * - Kiểm tra CAPTCHA / bảo mật (dừng chờ người dùng xử lý thủ công nếu gặp).
+ * - Báo thông điệp kết thúc: "Đã bật chế độ proxy và tải lại trang TabB."
+ */
+export async function reloadTabBThroughProxy(options: ReloadTabBOptions): Promise<Page> {
+  const { browserManager, tabBUrl, existingTabB, stepName, timeoutMs, logger, flowName = 'yopmail-muse' } = options;
+
+  if (!tabBUrl || typeof tabBUrl !== 'string' || !tabBUrl.trim()) {
+    throw new Error(`[LỖI URL TAB B] URL để tải lại TabB không được để trống. Bước: "${stepName}".`);
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(tabBUrl.trim());
+  } catch {
+    throw new Error(`[LỖI URL TAB B] URL không hợp lệ: "${sanitizeUrl(tabBUrl)}". Bước: "${stepName}".`);
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error(
+      `[LỖI URL TAB B] URL không sử dụng giao thức http hoặc https ("${parsedUrl.protocol}"). Bước: "${stepName}".`
+    );
+  }
+
+  const safeUrlForLog = `${parsedUrl.origin}${parsedUrl.pathname}`;
+
+  // Kiểm tra xem TabB cũ còn khả dụng và chưa bị đóng hay không (trường hợp không restart Chrome)
+  const isExistingTabBAlive = existingTabB && typeof existingTabB.isClosed === 'function' && !existingTabB.isClosed();
+
+  let targetTabB: Page;
+
+  if (isExistingTabBAlive) {
+    // Trường hợp proxy đã bật và Chrome không restart:
+    // Dùng TabB hiện tại, gọi TabB.reload() để thực hiện yêu cầu tải lại như F5.
+    logger?.info(
+      `TabB: Đang tải lại TabB (reload) tới URL: ${safeUrlForLog}...`,
+      { flow: flowName, step: stepName }
+    );
+    await existingTabB.reload({
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs
+    });
+
+    if (typeof existingTabB.bringToFront === 'function') {
+      await existingTabB.bringToFront();
+    }
+
+    targetTabB = existingTabB;
+  } else {
+    // Trường hợp Chrome vừa restart:
+    // Tuyệt đối không gọi reload() hoặc bringToFront() trên TabB cũ đã đóng.
+    if (!browserManager) {
+      throw new Error(
+        `[LỖI RUNNER] BrowserManager không khả dụng để tạo TabB mới sau khi restart Chrome. Bước: "${stepName}".`
+      );
+    }
+
+    logger?.info(
+      `TabB: Chrome vừa khởi động lại với cấu hình proxy. Đang tạo TabB mới trong context mới và truy cập URL: ${safeUrlForLog}...`,
+      { flow: flowName, step: stepName }
+    );
+
+    // Tạo Page mới trong context mới
+    const newPage: Page = typeof browserManager.newPage === 'function'
+      ? await browserManager.newPage('TabB')
+      : await browserManager.getSession().context.newPage();
+
+    // Đăng ký lại Page này dưới tên TabB trong bộ quản lý tab
+    if (typeof browserManager.registerPage === 'function') {
+      browserManager.registerPage('TabB', newPage);
+    }
+
+    // Đóng tab trắng mặc định 'default' nếu có và đang ở about:blank
+    try {
+      if (typeof browserManager.getPage === 'function') {
+        const defaultPage = browserManager.getPage('default');
+        if (defaultPage && !defaultPage.isClosed() && defaultPage !== newPage) {
+          const dUrl = typeof defaultPage.url === 'function' ? defaultPage.url() : '';
+          if (!dUrl || dUrl === 'about:blank') {
+            await defaultPage.close().catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // Bỏ qua lỗi đóng tab mặc định
+    }
+
+    // Truy cập tabBUrl bằng goto()
+    await newPage.goto(tabBUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs
+    });
+
+    // Đưa TabB hiện tại lên trước để quan sát
+    if (typeof newPage.bringToFront === 'function') {
+      await newPage.bringToFront();
+    }
+
+    targetTabB = newPage;
+  }
+
+  // Kiểm tra nếu gặp đăng nhập lại hoặc xác minh người dùng (CAPTCHA, Cloudflare, ...)
+  await checkCaptchaOrVerification(targetTabB, 'TabB', stepName);
+
+  const completionMsg = 'Đã bật chế độ proxy và tải lại trang TabB.';
+  logger?.info(completionMsg, { flow: flowName, step: stepName });
+  console.log(completionMsg);
+
+  return targetTabB;
 }
 
 /**
@@ -3478,6 +3639,7 @@ export async function activateTabB(options: {
 export const yopmailMuseFlow: Flow = {
   name: 'yopmail-muse',
   description: 'Luồng tuần tự hai tab: TabA mở Temp-Mail lấy email, TabB mở Muse.ai gửi OTP, TabA lấy OTP, TabB nhập OTP và xác nhận',
+  supportsConcurrency: false,
   steps: [
     {
       id: 'tabA-tempmail',
@@ -3577,10 +3739,13 @@ export const yopmailMuseFlow: Flow = {
             (await contactBtnLocator.first().isVisible().catch(() => false));
 
           if (hasContactBtn) {
-            context.logger.info('TabB: Đã tìm thấy [data-pel-click="login_use_contact_click"]. Đang click...', { flow: 'yopmail-muse', step: 'tabB-muse' });
-            await contactBtnLocator.first().click();
-            context.logger.info('TabB: Đã click [data-pel-click="login_use_contact_click"] thành công.', { flow: 'yopmail-muse', step: 'tabB-muse' });
-            break;
+            const isContactBtnEnabled = await contactBtnLocator.first().isEnabled().catch(() => false);
+            if (isContactBtnEnabled) {
+              context.logger.info('TabB: Đã tìm thấy [data-pel-click="login_use_contact_click"] và nút đã enable. Đang click...', { flow: 'yopmail-muse', step: 'tabB-muse' });
+              await contactBtnLocator.first().click();
+              context.logger.info('TabB: Đã click [data-pel-click="login_use_contact_click"] thành công.', { flow: 'yopmail-muse', step: 'tabB-muse' });
+              break;
+            }
           }
 
           const hasInput = (await inputLocator.count().catch(() => 0)) > 0 &&
@@ -3593,6 +3758,19 @@ export const yopmailMuseFlow: Flow = {
 
           await new Promise((r) => setTimeout(r, 200));
         }
+
+        context.logger.info('TabB: Chờ nút tiếp tục (selector "[data-pel-click=\\"login_contact_continue_click\\"]") hiển thị và kích hoạt (enable) trước khi nhập email...', { flow: 'yopmail-muse', step: 'tabB-muse' });
+        const continueBtn = await waitForSingleMatchingElement({
+          page: tabB,
+          selector: '[data-pel-click="login_contact_continue_click"]',
+          tabName: 'TabB',
+          stepName: 'tabB-muse',
+          timeoutMs: context.config.actionTimeoutMs,
+          role: 'clickable',
+          cancellationToken: context.cancellationToken,
+          logger: context.logger
+        });
+        context.logger.info('TabB: Nút tiếp tục đã kích hoạt (enable). Đang chuẩn bị nhập/paste email...', { flow: 'yopmail-muse', step: 'tabB-muse' });
 
         context.logger.info('TabB: Chờ input selector "input[data-slot=\\"input\\"]" hiển thị và có thể nhập...', { flow: 'yopmail-muse', step: 'tabB-muse' });
         const emailInput = await waitForSingleMatchingElement({
@@ -3617,16 +3795,23 @@ export const yopmailMuseFlow: Flow = {
         }
         context.logger.info(`TabB: Đã kiểm tra giá trị input khớp chính xác với emailAddress ("${actualEmail}").`, { flow: 'yopmail-muse', step: 'tabB-muse' });
 
-        context.logger.info('TabB: Chờ phần tử selector "[data-pel-click=\\"login_contact_continue_click\\"]" hiển thị và có thể click...', { flow: 'yopmail-muse', step: 'tabB-muse' });
-        const continueBtn = await waitForSingleMatchingElement({
-          page: tabB,
-          selector: '[data-pel-click="login_contact_continue_click"]',
-          tabName: 'TabB',
-          stepName: 'tabB-muse',
-          timeoutMs: context.config.actionTimeoutMs,
-          role: 'clickable',
-          cancellationToken: context.cancellationToken
-        });
+        // Delay khoảng 2 giây sau khi nhập email vào input cho đến khi nút click được
+        const delayAfterPasteMs = 2000;
+        context.logger.info(
+          `TabB: Đã nhập email vào input. Tạm dừng ${delayAfterPasteMs}ms (khoảng 2 giây) cho đến khi nút tiếp tục sẵn sàng bấm...`,
+          { flow: 'yopmail-muse', step: 'tabB-muse' }
+        );
+        const delayStartTime = Date.now();
+        while (Date.now() - delayStartTime < delayAfterPasteMs) {
+          if (isCancelled(context.cancellationToken)) {
+            throw new Error('[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabB, bước "tabB-muse".');
+          }
+          if (tabB.isClosed()) {
+            throw new Error('[LỖI TAB ĐÃ ĐÓNG] TabB đã bị đóng sau khi nhập email. Không tự tạo tab thay thế. Bước: "tabB-muse".');
+          }
+          await checkCaptchaOrVerification(tabB, 'TabB', 'tabB-muse');
+          await new Promise((resolve) => setTimeout(resolve, Math.min(200, delayAfterPasteMs - (Date.now() - delayStartTime))));
+        }
 
         context.logger.info('TabB: Đang click phần tử [data-pel-click="login_contact_continue_click"] đúng một lần...', { flow: 'yopmail-muse', step: 'tabB-muse' });
         await continueBtn.click();
@@ -4027,20 +4212,12 @@ export const yopmailMuseFlow: Flow = {
       execute: async (context: FlowContext) => {
         const state = getYopmailMuseState(context);
 
-        // Đảm bảo request trang B đã load xong và hiển thị "Tham gia danh sách chờ Muse" trước khi mở Tab C
+        // Đảm bảo Tab B đã hiển thị "Tham gia danh sách chờ Muse" trước khi mở Tab C
         if (state.tabB && !state.tabB.isClosed()) {
           context.logger.info('TabB: Xác nhận màn hình "Tham gia danh sách chờ Muse" hiển thị trước khi mở TabC...', {
             flow: 'yopmail-muse',
             step: 'tabC-open-meta-security'
           });
-          if (typeof state.tabB.waitForLoadState === 'function') {
-            try {
-              await state.tabB.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-              await state.tabB.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
-            } catch {
-              // Bỏ qua timeout nếu trang duy trì websocket/long-polling
-            }
-          }
           await waitForMuseWaitlistScreen({
             page: state.tabB,
             stepName: 'tabC-open-meta-security',
@@ -4048,7 +4225,6 @@ export const yopmailMuseFlow: Flow = {
             cancellationToken: context.cancellationToken,
             logger: context.logger
           });
-          await new Promise((r) => setTimeout(r, 500));
         }
 
         const browserContext = (state.tabB || state.tabA || context.page).context();
@@ -4479,18 +4655,99 @@ export const yopmailMuseFlow: Flow = {
         }
 
         const tabB = state.tabB;
-        await activateTabB({
+        const tabBUrl = await activateTabB({
           pageB: tabB,
           stepName: 'tabB-activate',
           logger: context.logger
         });
 
         context.page = tabB;
+        state.tabBUrl = tabBUrl;
         state.tabBReactivated = true;
       },
       verify: async (context: FlowContext) => {
         const state = getYopmailMuseState(context);
-        return Boolean(state.tabBReactivated === true && state.tabB && !state.tabB.isClosed());
+        return Boolean(state.tabBReactivated === true && state.tabBUrl && state.tabB && !state.tabB.isClosed());
+      }
+    },
+    {
+      id: 'tabB-enable-proxy',
+      name: 'Bật proxy bằng module chuyển kết nối hiện có',
+      execute: async (context: FlowContext) => {
+        const bm = context.browserManager;
+        if (!bm) {
+          throw new Error('[LỖI RUNNER] BrowserManager không khả dụng trong FlowContext. Bước: "tabB-enable-proxy".');
+        }
+
+        const state = getYopmailMuseState(context);
+        const modeBefore = bm.getConnectionMode();
+
+        // Kiểm tra cấu hình proxy trước khi đóng Chrome
+        const proxyConfig = context.config.proxy;
+        if (!proxyConfig || !proxyConfig.server || !proxyConfig.server.trim()) {
+          throw new Error(
+            '[LỖI CẤU HÌNH PROXY] Không thể bật proxy vì "proxy.server" chưa được cấu hình.\n' +
+            'Dừng luồng ngay lập tức, tuyệt đối không tự động fallback sang kết nối trực tiếp.'
+          );
+        }
+
+        context.logger.info(
+          `Đang kích hoạt module chuyển kết nối sang "proxy" (chế độ hiện tại: "${modeBefore}")...`,
+          { flow: 'yopmail-muse', step: 'tabB-enable-proxy' }
+        );
+
+        // Chuyển kết nối sang proxy bằng module chuyển kết nối hiện có
+        await bm.switchConnectionMode('proxy');
+
+        state.tabA = undefined;
+        state.tabC = undefined;
+        // Nếu TabB cũ đã bị đóng (do restart Chrome hoặc đổi context), vô hiệu hóa tham chiếu cũ
+        if (state.tabB && typeof state.tabB.isClosed === 'function' && state.tabB.isClosed()) {
+          state.tabB = undefined;
+        } else if (!state.tabB) {
+          state.tabB = bm.getPage('TabB');
+        }
+        if (state.tabB) {
+          context.page = state.tabB;
+        }
+
+        state.proxyEnabled = true;
+      },
+      verify: async (context: FlowContext) => {
+        const state = getYopmailMuseState(context);
+        const isProxy = context.browserManager ? context.browserManager.getConnectionMode() === 'proxy' : false;
+        return Boolean(state.proxyEnabled === true && isProxy);
+      }
+    },
+    {
+      id: 'tabB-reload-proxy',
+      name: 'Tải lại trang TabB qua proxy',
+      execute: async (context: FlowContext) => {
+        const state = getYopmailMuseState(context);
+        if (!state.tabBUrl) {
+          throw new Error(
+            '[LỖI TRẠNG THÁI] Không tìm thấy URL của TabB (tabBUrl) đã lưu để tải lại qua proxy. Bước: "tabB-reload-proxy".'
+          );
+        }
+
+        const bm = context.browserManager;
+        const targetPage = await reloadTabBThroughProxy({
+          browserManager: bm,
+          tabBUrl: state.tabBUrl,
+          existingTabB: state.tabB,
+          stepName: 'tabB-reload-proxy',
+          timeoutMs: context.config.navigationTimeoutMs,
+          logger: context.logger,
+          flowName: 'yopmail-muse'
+        });
+
+        state.tabB = targetPage;
+        context.page = targetPage;
+        state.tabBReloaded = true;
+      },
+      verify: async (context: FlowContext) => {
+        const state = getYopmailMuseState(context);
+        return Boolean(state.tabBReloaded === true && state.tabB && !state.tabB.isClosed());
       }
     }
   ]

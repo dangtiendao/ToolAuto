@@ -2,6 +2,8 @@ export interface RawProxyConfig {
   enabled?: boolean;
   server?: string;
   bypass?: string;
+  username?: string;
+  password?: string;
 }
 
 export interface RawProfileDefinition {
@@ -14,6 +16,22 @@ export interface RawBrowserConfig {
   cdpPort?: unknown;
   userDataDir?: unknown;
   profiles?: Record<string, RawProfileDefinition>;
+}
+
+export type BrowserMode = 'incognito' | 'persistent';
+
+export interface RawJobConfig {
+  id?: unknown;
+  flowName?: unknown;
+  connectionMode?: unknown;
+  data?: unknown;
+}
+
+export interface JobConfig {
+  id: string;
+  flowName: string;
+  connectionMode?: 'direct' | 'proxy';
+  data?: Record<string, unknown>;
 }
 
 export interface RawConfig {
@@ -30,6 +48,9 @@ export interface RawConfig {
   phoneNumbersFile?: unknown;
   phoneMode?: unknown;
   incognito?: unknown;
+  browserMode?: unknown;
+  maxConcurrency?: unknown;
+  jobs?: unknown;
 }
 
 export interface ProxyConfig {
@@ -75,6 +96,9 @@ export interface AppConfig {
   phoneNumbersFile?: string;
   phoneMode: 'mock' | 'live';
   incognito?: boolean;
+  browserMode?: BrowserMode;
+  maxConcurrency: number;
+  jobs?: JobConfig[];
 }
 
 export interface ValidationResult {

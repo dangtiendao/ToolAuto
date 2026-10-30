@@ -11,6 +11,7 @@ import { Flow } from '../runner/types';
 export const demoFlow: Flow = {
   name: 'demo',
   description: 'Luồng mẫu kiểm tra trạng thái DOM, đọc tiêu đề và URL của trang',
+  supportsConcurrency: true,
   steps: [
     {
       id: 'wait-dom-ready',

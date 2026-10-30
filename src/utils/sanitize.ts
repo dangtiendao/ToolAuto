@@ -2,6 +2,7 @@
  * Loại bỏ thông tin xác thực (username:password) khỏi URL nếu có.
  */
 export function sanitizeUrl(rawUrl: string): string {
+  if (!rawUrl) return '';
   try {
     const parsed = new URL(rawUrl);
     parsed.username = '';

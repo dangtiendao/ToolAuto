@@ -3,6 +3,8 @@ import { BrowserManager, waitForEnter, BrowserSession } from './browser';
 import { getFlowOrThrow } from './flows';
 import { runFlow, FlowContext, FlowResult, saveFlowResult } from './runner';
 import { generateRunId, Logger, sanitizeUrl } from './utils';
+import { WorkerScheduler } from './worker/scheduler';
+import { TerminalController } from './terminal/controller';
 
 async function main(): Promise<void> {
   const projectRoot = getProjectRoot();
@@ -19,6 +21,8 @@ async function main(): Promise<void> {
   let browserManager: BrowserManager | null = null;
   let session: BrowserSession | null = null;
   let flowResult: FlowResult | null = null;
+  let scheduler: WorkerScheduler | null = null;
+  let terminalController: TerminalController | null = null;
   let isCleaningUp = false;
   let isCancelledByUser = false;
 
@@ -30,10 +34,21 @@ async function main(): Promise<void> {
     if (isSigint) {
       isCancelledByUser = true;
       abortController.abort();
-      logger.warn('Nhận tín hiệu dừng (Ctrl+C). Đang ngắt kết nối trình duyệt và hủy luồng...');
+      logger.warn('Nhận tín hiệu dừng (Ctrl+C). Đang ngắt kết nối trình duyệt và dừng các luồng...');
     }
 
-    // Đóng browser context an toàn qua BrowserManager
+    // Nếu đang chạy chế độ multi-worker scheduler
+    if (scheduler) {
+      if (terminalController) {
+        terminalController.close();
+        terminalController = null;
+      }
+      await scheduler.stopAll();
+      scheduler = null;
+      logger.info('Đã dừng toàn bộ workers và đóng các Chrome an toàn.');
+    }
+
+    // Đóng browser context đơn lẻ (nếu ở chế độ legacy)
     if (browserManager) {
       await browserManager.close();
       browserManager = null;
@@ -73,19 +88,48 @@ async function main(): Promise<void> {
     logger.info('Cấu hình đã nạp thành công (đã ẩn các thông tin nhạy cảm):');
     logger.info(JSON.stringify(formatSafeConfig(config), null, 2));
 
-    // 2. Tra cứu luồng trong Registry
+    // 2. Kiểm tra chế độ chạy: Multi-worker Incognito hay Single-flow Legacy
+    const isMultiWorker = Boolean(config.jobs && config.jobs.length > 0);
+
+    if (isMultiWorker && config.jobs && config.jobs.length > 0) {
+      logger.info(
+        `[CHẾ ĐỘ MULTI-WORKER] Khởi động bộ quản lý ${config.jobs.length} jobs với tối đa ${config.maxConcurrency} Chrome đồng thời.`
+      );
+
+      scheduler = new WorkerScheduler({
+        config,
+        runId,
+        projectRoot,
+        autoCloseOnComplete: false,
+        maxConcurrency: config.maxConcurrency
+      });
+
+      terminalController = new TerminalController(scheduler);
+      terminalController.startListening();
+
+      scheduler.start();
+      await scheduler.waitForIdle();
+
+      terminalController.close();
+      terminalController = null;
+
+      logger.info('Tất cả các worker trong hàng đợi đã hoàn tất.');
+      process.exit(0);
+      return;
+    }
+
+    // 3. Chế độ đơn lẻ (Legacy persistent runner)
     const flow = getFlowOrThrow(config.flowName);
     logger.info(`Đã chọn luồng: "${flow.name}"`);
 
-    // 3. Khởi tạo Trình quản lý trình duyệt (BrowserManager)
     browserManager = new BrowserManager(config, undefined, logger);
     const initialMode = browserManager.getConnectionMode();
     logger.info(`Chế độ kết nối ban đầu: "${initialMode}"`);
 
-    // 4. Khởi chạy Google Chrome theo cấu hình đã chọn
     logger.info(`Đang khởi chạy Google Chrome...`);
     session = await browserManager.initSession();
     logger.info(`Đã khởi chạy Chrome chính thức từ: ${session.executablePath || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'}`);
+
     if (config.incognito) {
       logger.info(`Chế độ trình duyệt: ẨN DANH (Incognito) - Tab ẩn danh không lưu session/profile.`);
     } else {
@@ -93,11 +137,7 @@ async function main(): Promise<void> {
       logger.info(`Đường dẫn profile đầy đủ (Profile Path): ${config.selectedProfile.fullPath}`);
     }
     logger.info(`Đã mở URL ban đầu: ${sanitizeUrl(config.startUrl)}`);
-    logger.info(
-      '(Lưu ý: Mở trang thành công xác nhận kết nối mạng/proxy tới URL ban đầu hoạt động, không phải là xác minh IP đầu ra).'
-    );
 
-    // 5. Chuẩn bị Context và thực thi luồng
     const flowContext: FlowContext = {
       page: session.page,
       config,
@@ -112,7 +152,6 @@ async function main(): Promise<void> {
     logger.info('Kết quả thực thi luồng:');
     logger.info(JSON.stringify(flowResult, null, 2));
 
-    // 6. Nếu không bị hủy, chờ người dùng nhấn Enter để đóng Chrome
     if (!isCancelledByUser && !abortController.signal.aborted) {
       await waitForEnter();
     }
@@ -120,7 +159,6 @@ async function main(): Promise<void> {
     const errorMsg = (err as Error).message || String(err);
     logger.error(`Đã xảy ra lỗi thực thi: ${errorMsg}`);
 
-    // Lưu kết quả lỗi nếu chưa có flowResult
     if (!flowResult) {
       flowResult = {
         runId,
@@ -140,7 +178,6 @@ async function main(): Promise<void> {
     await cleanup(false);
   }
 
-  // 7. Phân loại mã thoát theo quy định
   if (isCancelledByUser || flowResult?.status === 'cancelled') {
     process.exit(130);
   } else if (flowResult?.status === 'failed') {

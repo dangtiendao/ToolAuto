@@ -7,8 +7,12 @@ import {
   ValidationResult,
   ProfileDefinition,
   BrowserProfilesConfig,
-  SelectedProfile
+  SelectedProfile,
+  JobConfig,
+  RawJobConfig,
+  BrowserMode
 } from './types';
+import { getFlow } from '../flows/registry';
 
 // Tải biến môi trường từ .env nếu có
 dotenv.config();
@@ -92,10 +96,38 @@ export function validateConfig(
 
   const rawConfig = raw as RawConfig;
 
-  // 1. Kiểm tra startUrl (bắt buộc, chỉ dùng giao thức http hoặc https)
+  // 0. Xác định browserMode ('incognito' | 'persistent')
+  let browserMode: BrowserMode;
+  if (rawConfig.browserMode !== undefined && rawConfig.browserMode !== null) {
+    if (rawConfig.browserMode !== 'incognito' && rawConfig.browserMode !== 'persistent') {
+      errors.push(
+        `"browserMode" không hợp lệ: "${rawConfig.browserMode}". Giá trị hợp lệ là "incognito" hoặc "persistent".`
+      );
+      browserMode = 'incognito';
+    } else {
+      browserMode = rawConfig.browserMode as BrowserMode;
+    }
+  } else if (rawConfig.jobs !== undefined || rawConfig.incognito === true) {
+    browserMode = 'incognito';
+  } else {
+    browserMode = 'persistent';
+  }
+
+  const isIncognitoMode = browserMode === 'incognito' || rawConfig.incognito === true;
+  const incognito = isIncognitoMode;
+
+  if (rawConfig.incognito !== undefined && rawConfig.incognito !== null && typeof rawConfig.incognito !== 'boolean') {
+    errors.push(`"incognito" phải là giá trị boolean (true hoặc false). Nhận được: ${typeof rawConfig.incognito}`);
+  }
+
+  // 1. Kiểm tra startUrl
   let startUrl = '';
   if (typeof rawConfig.startUrl !== 'string' || !rawConfig.startUrl.trim()) {
-    errors.push('Trường "startUrl" là bắt buộc và không được để trống.');
+    if (rawConfig.jobs !== undefined && Array.isArray(rawConfig.jobs)) {
+      startUrl = 'https://example.com';
+    } else {
+      errors.push('Trường "startUrl" là bắt buộc và không được để trống.');
+    }
   } else {
     try {
       const parsedUrl = new URL(rawConfig.startUrl.trim());
@@ -111,12 +143,7 @@ export function validateConfig(
     }
   }
 
-  // 2. Kiểm tra xung đột cấu hình profile (profileDir cũ vs browser mới)
-  const incognito = rawConfig.incognito === true;
-  if (rawConfig.incognito !== undefined && rawConfig.incognito !== null && typeof rawConfig.incognito !== 'boolean') {
-    errors.push(`"incognito" phải là giá trị boolean (true hoặc false). Nhận được: ${typeof rawConfig.incognito}`);
-  }
-
+  // 2. Kiểm tra cấu hình profile
   const hasLegacyProfileDir =
     typeof rawConfig.profileDir === 'string' && rawConfig.profileDir.trim().length > 0;
   const hasNewBrowserConfig =
@@ -124,7 +151,13 @@ export function validateConfig(
     rawConfig.browser !== null &&
     typeof rawConfig.browser === 'object';
 
-  if (hasLegacyProfileDir && hasNewBrowserConfig) {
+  if (isIncognitoMode && (hasLegacyProfileDir || hasNewBrowserConfig)) {
+    console.warn(
+      '[CẤU HÌNH] Chế độ browserMode là "incognito": Các thiết lập profile (userDataDir, profileDirectory, profileName) không áp dụng trong chế độ này.'
+    );
+  }
+
+  if (!isIncognitoMode && hasLegacyProfileDir && hasNewBrowserConfig) {
     errors.push(
       '[XUNG ĐỘT CẤU HÌNH] Phát hiện đồng thời cả "profileDir" (cấu hình cũ) và "browser" (cấu hình mới theo tên profile).\n' +
       '  -> Hệ thống không tự ý chọn ngầm một giá trị để đảm bảo tính nhất quán.\n' +
@@ -137,7 +170,16 @@ export function validateConfig(
   let browserConfig: BrowserProfilesConfig | undefined;
   let profileDir = '';
 
-  if (hasNewBrowserConfig) {
+  if (isIncognitoMode) {
+    selectedProfile = {
+      profileName: 'Incognito',
+      userDataDir: '',
+      profileDirectory: 'Incognito',
+      fullPath: '',
+      cdpPort: 9222
+    };
+    profileDir = '';
+  } else if (hasNewBrowserConfig) {
     const rawBrowser = rawConfig.browser!;
     const rawProfiles = rawBrowser.profiles;
 
@@ -273,15 +315,6 @@ export function validateConfig(
       fullPath: resolvedPath,
       cdpPort: 9222
     };
-  } else if (incognito) {
-    selectedProfile = {
-      profileName: 'Incognito',
-      userDataDir: '',
-      profileDirectory: 'Incognito',
-      fullPath: '',
-      cdpPort: 9222
-    };
-    profileDir = '';
   } else {
     errors.push(
       'Cấu hình thiếu thông tin profile: Vui lòng định nghĩa khối "browser" với "profileName" và "profiles".'
@@ -363,7 +396,7 @@ export function validateConfig(
   const isInitialProxy = initialConnectionMode === 'proxy';
   let proxyConfig: AppConfig['proxy'];
 
-  const proxyServer =
+  let proxyServer =
     typeof rawProxy?.server === 'string' && rawProxy.server.trim()
       ? rawProxy.server.trim()
       : undefined;
@@ -371,8 +404,26 @@ export function validateConfig(
     typeof rawProxy?.bypass === 'string' && rawProxy.bypass.trim()
       ? rawProxy.bypass.trim()
       : undefined;
-  const proxyUsername = env.PROXY_USERNAME?.trim() || undefined;
-  const proxyPassword = env.PROXY_PASSWORD || undefined;
+  let proxyUsername =
+    (typeof rawProxy?.username === 'string' && rawProxy.username.trim()) ||
+    env.PROXY_USERNAME?.trim() ||
+    undefined;
+  let proxyPassword =
+    (typeof rawProxy?.password === 'string' && rawProxy.password) ||
+    env.PROXY_PASSWORD ||
+    undefined;
+
+  // Hỗ trợ định dạng host:port:username:password phổ biến
+  if (proxyServer) {
+    const hpupMatch = proxyServer.match(/^([a-zA-Z0-9.-]+):(\d+):([^:]+):([^:]+)$/);
+    if (hpupMatch) {
+      proxyServer = `http://${hpupMatch[1]}:${hpupMatch[2]}`;
+      if (!proxyUsername) proxyUsername = hpupMatch[3];
+      if (!proxyPassword) proxyPassword = hpupMatch[4];
+    } else if (!/^([a-zA-Z0-9+.-]+):\/\//.test(proxyServer) && /^([a-zA-Z0-9.-]+):(\d+)$/.test(proxyServer)) {
+      proxyServer = `http://${proxyServer}`;
+    }
+  }
 
   if (isProxyExplicitlyEnabled || isInitialProxy) {
     if (!proxyServer) {
@@ -428,6 +479,84 @@ export function validateConfig(
     }
   }
 
+  // 11. Kiểm tra maxConcurrency (số nguyên dương, mặc định 2)
+  let maxConcurrency = 2;
+  if (rawConfig.maxConcurrency !== undefined && rawConfig.maxConcurrency !== null) {
+    if (
+      typeof rawConfig.maxConcurrency !== 'number' ||
+      !Number.isInteger(rawConfig.maxConcurrency) ||
+      rawConfig.maxConcurrency <= 0
+    ) {
+      errors.push(`"maxConcurrency" phải là số nguyên dương (> 0). Nhận được: ${rawConfig.maxConcurrency}`);
+    } else {
+      maxConcurrency = rawConfig.maxConcurrency;
+    }
+  }
+
+  // 12. Kiểm tra jobs
+  let parsedJobs: JobConfig[] | undefined;
+  if (rawConfig.jobs !== undefined && rawConfig.jobs !== null) {
+    if (!Array.isArray(rawConfig.jobs)) {
+      errors.push('Trường "jobs" phải là một mảng (Array).');
+    } else if (rawConfig.jobs.length === 0) {
+      errors.push('Trường "jobs" phải chứa ít nhất một job.');
+    } else {
+      parsedJobs = [];
+      const seenJobIds = new Set<string>();
+
+      for (let i = 0; i < rawConfig.jobs.length; i++) {
+        const item = rawConfig.jobs[i];
+        if (!item || typeof item !== 'object') {
+          errors.push(`Phần tử jobs[${i}] phải là một object.`);
+          continue;
+        }
+
+        const rawJob = item as RawJobConfig;
+        if (typeof rawJob.id !== 'string' || !rawJob.id.trim()) {
+          errors.push(`Job tại vị trí [${i}] thiếu trường "id" hợp lệ.`);
+          continue;
+        }
+        const jobId = rawJob.id.trim();
+        if (seenJobIds.has(jobId)) {
+          errors.push(`[LỖI CẤU HÌNH] Job id không được trùng: "${jobId}" xuất hiện nhiều lần.`);
+        }
+        seenJobIds.add(jobId);
+
+        if (typeof rawJob.flowName !== 'string' || !rawJob.flowName.trim()) {
+          errors.push(`Job "${jobId}" thiếu trường "flowName" hợp lệ.`);
+          continue;
+        }
+        const jFlowName = rawJob.flowName.trim();
+        const flowDef = getFlow(jFlowName);
+        if (!flowDef) {
+          errors.push(
+            `[LỖI CẤU HÌNH] Không tìm thấy luồng có tên "${jFlowName}" trong registry cho job "${jobId}". Tuyệt đối không tự ý fallback sang flow khác.`
+          );
+        }
+
+        let jConnMode: 'direct' | 'proxy' = 'direct';
+        if (rawJob.connectionMode !== undefined && rawJob.connectionMode !== null) {
+          if (rawJob.connectionMode !== 'direct' && rawJob.connectionMode !== 'proxy') {
+            errors.push(
+              `"connectionMode" của job "${jobId}" không hợp lệ: "${rawJob.connectionMode}". Giá trị hợp lệ là "direct" hoặc "proxy".`
+            );
+          } else {
+            jConnMode = rawJob.connectionMode;
+          }
+        }
+
+        parsedJobs.push({
+          id: jobId,
+          flowName: jFlowName,
+          connectionMode: jConnMode,
+          data: typeof rawJob.data === 'object' && rawJob.data !== null ? (rawJob.data as Record<string, unknown>) : undefined
+        });
+      }
+    }
+  } else {
+    parsedJobs = undefined;
+  }
+
   if (errors.length > 0 || !selectedProfile) {
     return {
       valid: false,
@@ -452,7 +581,10 @@ export function validateConfig(
       proxy: proxyConfig,
       phoneNumbersFile,
       phoneMode,
-      incognito
+      incognito,
+      browserMode,
+      maxConcurrency,
+      jobs: parsedJobs
     }
   };
 }
@@ -562,7 +694,14 @@ export function formatSafeConfig(config: AppConfig): Record<string, unknown> {
         },
     phoneMode: config.phoneMode,
     phoneNumbersFile: config.phoneNumbersFile,
-    incognito: Boolean(config.incognito)
+    incognito: Boolean(config.incognito),
+    browserMode: config.browserMode,
+    maxConcurrency: config.maxConcurrency,
+    jobs: config.jobs?.map((j) => ({
+      id: j.id,
+      flowName: j.flowName,
+      connectionMode: j.connectionMode
+    }))
   };
 }
 
