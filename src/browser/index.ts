@@ -4,6 +4,7 @@ import { chromium, BrowserContext, Browser } from 'playwright';
 import { AppConfig } from '../config/types';
 import { BrowserSession, ConnectionMode } from './types';
 import { buildPlaywrightProxy } from './proxy';
+import { safeGoto } from './navigation';
 import {
   isCdpAvailable,
   getChromeExecutablePath,
@@ -11,7 +12,8 @@ import {
   handleLaunchError,
   closeBrowser,
   waitForEnter,
-  LaunchBrowserOptions
+  LaunchBrowserOptions,
+  buildWindowArgs
 } from './common';
 
 export interface ExtendedLaunchBrowserOptions extends LaunchBrowserOptions {
@@ -37,7 +39,10 @@ export async function launchBrowser(
 
   // Khởi chạy chế độ Incognito nếu cấu hình incognito = true
   if (config.incognito) {
-    const launchArgs = ['--incognito'];
+    const launchArgs = [
+      '--incognito',
+      ...buildWindowArgs(config.windowSize, config.windowPosition)
+    ];
     if (effectiveMode === 'direct') {
       launchArgs.push('--no-proxy-server');
     }
@@ -68,9 +73,11 @@ export async function launchBrowser(
     page.setDefaultTimeout(config.actionTimeoutMs);
     page.setDefaultNavigationTimeout(config.navigationTimeoutMs);
     try {
-      await page.goto(config.startUrl, {
+      await safeGoto(page, config.startUrl, {
         timeout: config.navigationTimeoutMs,
-        waitUntil: 'domcontentloaded'
+        waitUntil: 'domcontentloaded',
+        maxRetries: config.pageLoadMaxRetries,
+        retryDelayMs: config.pageLoadRetryDelayMs
       });
     } catch (err) {
       await browser.close().catch(() => {});
@@ -161,9 +168,11 @@ export async function launchBrowser(
     page.setDefaultNavigationTimeout(config.navigationTimeoutMs);
 
     try {
-      await page.goto(config.startUrl, {
+      await safeGoto(page, config.startUrl, {
         timeout: config.navigationTimeoutMs,
-        waitUntil: 'domcontentloaded'
+        waitUntil: 'domcontentloaded',
+        maxRetries: config.pageLoadMaxRetries,
+        retryDelayMs: config.pageLoadRetryDelayMs
       });
     } catch (err) {
       if (effectiveMode === 'proxy') {
@@ -180,7 +189,10 @@ export async function launchBrowser(
   }
 
   // 4. Nếu chưa có phiên CDP: Tự động khởi chạy Google Chrome chính thức qua Persistent Context
-  const launchArgs = [`--profile-directory=${config.selectedProfile.profileDirectory}`];
+  const launchArgs = [
+    `--profile-directory=${config.selectedProfile.profileDirectory}`,
+    ...buildWindowArgs(config.windowSize, config.windowPosition)
+  ];
   const launchOptions: Parameters<typeof chromium.launchPersistentContext>[1] = {
     channel: 'chrome',
     executablePath: chromeExe,
@@ -213,9 +225,11 @@ export async function launchBrowser(
   }
 
   try {
-    await page.goto(config.startUrl, {
+    await safeGoto(page, config.startUrl, {
       timeout: config.navigationTimeoutMs,
-      waitUntil: 'domcontentloaded'
+      waitUntil: 'domcontentloaded',
+      maxRetries: config.pageLoadMaxRetries,
+      retryDelayMs: config.pageLoadRetryDelayMs
     });
   } catch (err) {
     await closeBrowser(context);
@@ -229,3 +243,5 @@ export * from './types';
 export * from './proxy';
 export * from './common';
 export * from './manager';
+export * from './navigation';
+export * from './proxy-provider';

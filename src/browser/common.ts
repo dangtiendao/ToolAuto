@@ -4,7 +4,7 @@ import * as http from 'http';
 import * as readline from 'readline';
 import { BrowserSession } from './types';
 import { BrowserContext } from 'playwright';
-import { AppConfig } from '../config/types';
+import { AppConfig, WindowSizeConfig, WindowPositionConfig } from '../config/types';
 
 export interface LaunchBrowserOptions {
   autoConfirmNewProfile?: boolean;
@@ -191,4 +191,25 @@ export function waitForEnter(): Promise<void> {
       resolve();
     });
   });
+}
+
+/**
+ * Xây dựng danh sách tham số dòng lệnh Chrome để điều chỉnh kích thước và vị trí cửa sổ.
+ */
+export function buildWindowArgs(
+  windowSize?: WindowSizeConfig,
+  windowPosition?: WindowPositionConfig
+): string[] {
+  const args: string[] = [];
+  if (windowSize) {
+    if (windowSize === 'maximized') {
+      args.push('--start-maximized');
+    } else {
+      args.push(`--window-size=${windowSize.width},${windowSize.height}`);
+    }
+  }
+  if (windowPosition) {
+    args.push(`--window-position=${windowPosition.x},${windowPosition.y}`);
+  }
+  return args;
 }

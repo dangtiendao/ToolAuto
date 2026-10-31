@@ -25,8 +25,8 @@ export function sanitizeLogText(text: string): string {
     .replace(/(authorization\s*[:=]\s*)(bearer\s+[a-zA-Z0-9._~+/-]+=*|[^\s,;]+)/gi, '$1[REDACTED]')
     // Che cookie header
     .replace(/(cookie\s*[:=]\s*)([^;\r\n]+)/gi, '$1[REDACTED]')
-    // Che password, secret, token trong query string hoặc log
-    .replace(/([?&](?:password|token|secret|apiKey|access_token)=)([^&]+)/gi, '$1[REDACTED]')
+    // Che password, secret, token, otp trong query string hoặc log
+    .replace(/([?&](?:password|pass|token|secret|apiKey|access_token|otp|code)=)([^&#\s]+)/gi, '$1[REDACTED]')
     // Che các chuỗi user:pass trong url
     .replace(/:\/\/([^:@\s]+):([^@\s]+)@/g, '://[REDACTED]:[REDACTED]@');
 }

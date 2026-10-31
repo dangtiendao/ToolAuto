@@ -1,15 +1,18 @@
 import { Page, Locator } from 'playwright';
 import * as readline from 'readline';
 import { Flow, FlowContext, CancellationToken } from '../runner/types';
+import { ProxyConfig } from '../config/types';
 import { isCancelled } from '../runner';
 import { Logger } from '../utils/logger';
 import { sanitizeUrl } from '../utils/sanitize';
+import { safeGoto, safeReload, findWorkingProxy } from '../browser';
 import {
   readPhoneNumbersFromFile,
   selectRandomPhone,
   maskPhoneNumber,
   isPhoneEquivalent
 } from '../utils/phone';
+import { saveEmailToOutputFile } from '../utils/output';
 
 const LOWERCASE_CHARS = 'abcdefghijklmnopqrstuvwxyz';
 const DIGIT_CHARS = '0123456789';
@@ -61,8 +64,6 @@ export interface YopmailMuseState {
   tabCNextSubmitted?: boolean;
   tabBReactivated?: boolean;
   tabBUrl?: string;
-  proxyEnabled?: boolean;
-  tabBReloaded?: boolean;
 }
 
 /**
@@ -702,7 +703,7 @@ export async function waitForTempMailWithRefresh(options: {
   onRefreshClick?: (clickCount: number) => Promise<void>;
 }): Promise<Locator[]> {
   const { page, stepName, cancellationToken, logger, onRefreshClick } = options;
-  const cycleWaitMs = options.cycleWaitMs ?? 3000;
+  const cycleWaitMs = options.cycleWaitMs ?? 5000;
   const maxRefreshes = options.maxRefreshes ?? 3;
   const pollSliceMs = 200;
 
@@ -781,7 +782,7 @@ export async function waitForTempMailWithRefresh(options: {
         );
       }
       const refreshBtn = refreshBtnLoc.first();
-      await refreshBtn.click({ timeout: 3000 });
+      await refreshBtn.click({ timeout: 5000 });
     }
 
     // Tăng bộ đếm sau khi thực sự click
@@ -2308,6 +2309,218 @@ export async function waitForAnyMatchingElement(options: {
 }
 
 /**
+ * Danh sách selector nhận diện các nút "Allow all cookies" hoặc chấp nhận cookie trên Meta Accounts Center.
+ * Bao gồm cả thẻ button, div[role="button"], tiếng Anh, tiếng Việt và thuộc tính chuyên biệt của Meta.
+ */
+export const META_COOKIE_BUTTON_SELECTORS = [
+  '[data-cookiebanner="accept_button"]',
+  '[data-cookiebanner="accept_only_essential_button"]',
+  '[data-testid="cookie-policy-manage-dialog-accept-button"]',
+  '[data-testid="cookie-policy-dialog-accept-button"]',
+  '[data-testid*="cookie" i][data-testid*="accept" i]',
+  'button:has-text("Allow all cookies")',
+  '[role="button"]:has-text("Allow all cookies")',
+  'button:has-text("Cho phép tất cả cookie")',
+  '[role="button"]:has-text("Cho phép tất cả cookie")',
+  'button:has-text("Allow essential and optional cookies")',
+  '[role="button"]:has-text("Allow essential and optional cookies")',
+  'button:has-text("Cho phép cookie thiết yếu và tùy chọn")',
+  '[role="button"]:has-text("Cho phép cookie thiết yếu và tùy chọn")',
+  'button:has-text("Accept all cookies")',
+  '[role="button"]:has-text("Accept all cookies")',
+  'button:has-text("Accept all")',
+  '[role="button"]:has-text("Accept all")',
+  'button:has-text("Allow all")',
+  '[role="button"]:has-text("Allow all")',
+  'button:has-text("Cho phép tất cả")',
+  '[role="button"]:has-text("Cho phép tất cả")',
+  'button:has-text("Chấp nhận tất cả")',
+  '[role="button"]:has-text("Chấp nhận tất cả")'
+];
+
+/**
+ * Regex nhận diện nút "Allow all cookies" cho Playwright getByRole
+ */
+export const META_COOKIE_BUTTON_REGEX =
+  /Allow all cookies|Allow essential and optional cookies|Cho phép tất cả cookie|Cho phép cookie thiết yếu và tùy chọn|Accept all cookies|Accept all|Allow all|Cho phép tất cả|Chấp nhận tất cả/i;
+
+/**
+ * Regex nhận diện nút ở bước 2 nếu dialog tiếp theo là xác nhận hoặc tiếp tục
+ */
+export const META_COOKIE_STEP2_REGEX =
+  /Allow all cookies|Cho phép tất cả cookie|Accept all|Continue|Tiếp tục|Confirm|Xác nhận|Done|Hoàn tất/i;
+
+export interface MetaCookieConsentOptions {
+  page: Page;
+  stepName: string;
+  maxSteps?: number;
+  timeoutPerStepMs?: number;
+  logger?: Logger;
+  cancellationToken?: AbortSignal | CancellationToken;
+}
+
+/**
+ * Quét tìm nút "Allow all cookies" trên trang chính và tất cả các iframes nhúng (nếu có).
+ */
+async function findMetaCookieButton(
+  page: Page,
+  isStep2: boolean = false
+): Promise<{ button: Locator; foundIn: string } | null> {
+  const frames: any[] = [page, ...(typeof page.frames === 'function' ? page.frames() : [])];
+  const targetRegex = isStep2 ? META_COOKIE_STEP2_REGEX : META_COOKIE_BUTTON_REGEX;
+
+  for (let fIdx = 0; fIdx < frames.length; fIdx++) {
+    const frameOrPage = frames[fIdx];
+    const frameName = fIdx === 0 ? 'trang chính' : `iframe[${fIdx}]`;
+
+    // 1. Thử dùng getByRole('button') với regex
+    try {
+      if (typeof frameOrPage.getByRole === 'function') {
+        const roleBtn = frameOrPage.getByRole('button', { name: targetRegex });
+        const count = await roleBtn.count().catch(() => 0);
+        if (count > 0) {
+          for (let i = 0; i < count; i++) {
+            const btn = roleBtn.nth(i);
+            if (await btn.isVisible().catch(() => false)) {
+              return { button: btn, foundIn: `${frameName} (byRole: ${targetRegex.source})` };
+            }
+          }
+        }
+      }
+    } catch {}
+
+    // 2. Thử duyệt danh sách selector cố định
+    for (const selector of META_COOKIE_BUTTON_SELECTORS) {
+      try {
+        const loc = frameOrPage.locator(selector);
+        const count = await loc.count().catch(() => 0);
+        if (count > 0) {
+          for (let i = 0; i < count; i++) {
+            const btn = loc.nth(i);
+            if (await btn.isVisible().catch(() => false)) {
+              return { button: btn, foundIn: `${frameName} (${selector})` };
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 3. Nếu là bước 2: tìm nút xác nhận/tiếp tục bên trong dialog cookie
+    if (isStep2) {
+      try {
+        const dialogBtn = frameOrPage
+          .locator('div[role="dialog"] button, [data-testid*="cookie" i] button, [data-cookiebanner] button')
+          .filter({ hasText: targetRegex });
+        const count = await dialogBtn.count().catch(() => 0);
+        if (count > 0) {
+          const btn = dialogBtn.first();
+          if (await btn.isVisible().catch(() => false)) {
+            return { button: btn, foundIn: `${frameName} (dialog-continue)` };
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Xử lý cookie consent trên TabC (Meta):
+ * Đôi khi Meta yêu cầu bấm "Allow all cookies" qua 1 hoặc 2 bước dialog liên tiếp.
+ * Quét cả trang chính và các iframe nhúng, mỗi lần bấm nút sẽ chờ trang tải xong và ổn định DOM trước khi tiếp tục.
+ *
+ * @returns Số lần đã bấm nút "Allow all cookies" (0, 1 hoặc 2)
+ */
+export async function handleMetaCookieConsent(options: MetaCookieConsentOptions): Promise<number> {
+  const { page, stepName, maxSteps = 2, timeoutPerStepMs = 4000, logger, cancellationToken } = options;
+  let clickedCount = 0;
+
+  for (let step = 1; step <= maxSteps; step++) {
+    if (isCancelled(cancellationToken)) {
+      throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC trong khi xử lý cookie banner. Bước: "${stepName}".`);
+    }
+    if (typeof page.isClosed === 'function' && page.isClosed()) {
+      return clickedCount;
+    }
+
+    // 1. Quét tìm nút "Allow all cookies" đang hiển thị trên giao diện (cả trang chính và iframes)
+    let found = await findMetaCookieButton(page, step === 2);
+
+    // Nếu bước 1 chưa tìm thấy ngay, chờ tối đa timeoutPerStepMs để xem dialog có fade-in không
+    if (!found && step === 1 && timeoutPerStepMs > 0) {
+      const startTime = Date.now();
+      while (Date.now() - startTime < timeoutPerStepMs) {
+        if (isCancelled(cancellationToken) || (typeof page.isClosed === 'function' && page.isClosed())) break;
+        found = await findMetaCookieButton(page, false);
+        if (found) break;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+
+    // 2. Nếu tìm thấy nút
+    if (found) {
+      clickedCount++;
+      logger?.info(
+        `TabC: Phát hiện nút xác nhận cookie (bước ${clickedCount}/${maxSteps}, vị trí: ${found.foundIn}). Đang thực hiện bấm "Allow all cookies"...`,
+        { flow: 'yopmail-muse', step: stepName }
+      );
+
+      try {
+        await found.button.click({ timeout: 5000 });
+      } catch (clickErr) {
+        // Thử force click nếu bị overlay che
+        try {
+          await found.button.click({ force: true, timeout: 3000 });
+        } catch {
+          logger?.warn(
+            `TabC: Không thể bấm nút "Allow all cookies" ở bước ${clickedCount}: ${(clickErr as Error).message}`,
+            { flow: 'yopmail-muse', step: stepName }
+          );
+          break;
+        }
+      }
+
+      logger?.info(
+        `TabC: Đã bấm "Allow all cookies" lần ${clickedCount}. Đang đợi trang tải xong...`,
+        { flow: 'yopmail-muse', step: stepName }
+      );
+
+      // Đợi trang tải xong sau khi bấm mỗi lần
+      try {
+        await Promise.race([
+          page.waitForLoadState('domcontentloaded', { timeout: 10000 }),
+          page.waitForLoadState('load', { timeout: 10000 }),
+          new Promise((resolve) => setTimeout(resolve, 3000))
+        ]);
+      } catch {
+        // Bỏ qua nếu trang chỉ cập nhật DOM mà không kích hoạt full navigation
+      }
+
+      // Nghỉ ngắn để hiệu ứng đóng dialog/chuyển tiếp DOM hoàn tất
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      logger?.info(
+        `TabC: Đã hoàn tất tải trang sau khi bấm "Allow all cookies" lần ${clickedCount}.`,
+        { flow: 'yopmail-muse', step: stepName }
+      );
+    } else {
+      // Không còn nút "Allow all cookies" nào hiển thị
+      break;
+    }
+  }
+
+  if (clickedCount > 0) {
+    logger?.info(
+      `TabC: Đã hoàn thành xử lý cookie consent với tổng cộng ${clickedCount} bước bấm "Allow all cookies".`,
+      { flow: 'yopmail-muse', step: stepName }
+    );
+  }
+
+  return clickedCount;
+}
+
+/**
  * Chờ giao diện bảo mật Meta (Password and Security) sẵn sàng bằng điều kiện DOM.
  * Hỗ trợ cả tiếng Việt ([aria-label="Xác thực 2 yếu tố"]) và tiếng Anh ([aria-label="Two-factor authentication"]).
  */
@@ -2319,7 +2532,7 @@ export async function waitForMetaSecurityPageReady(options: {
   logger?: Logger;
 }): Promise<void> {
   const { page, stepName, timeoutMs, cancellationToken, logger } = options;
-  const startTime = Date.now();
+  let startTime = Date.now();
   const pollIntervalMs = 500;
   let hasLoggedNotice = false;
 
@@ -2342,6 +2555,7 @@ export async function waitForMetaSecurityPageReady(options: {
       throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trong khi chờ trang bảo mật Meta sẵn sàng. Bước: "${stepName}".`);
     }
 
+    // 1. Kiểm tra nếu giao diện bảo mật Meta đã sẵn sàng
     for (const cand of twoFactorCandidates) {
       try {
         const twoFactorLoc = page.locator(cand);
@@ -2356,6 +2570,24 @@ export async function waitForMetaSecurityPageReady(options: {
         }
       } catch {}
     }
+
+    // 2. Kiểm tra nếu xuất hiện banner cookie (quét cả trang chính và iframes)
+    try {
+      const cookieHandled = await handleMetaCookieConsent({
+        page,
+        stepName,
+        maxSteps: 2,
+        timeoutPerStepMs: 400,
+        logger,
+        cancellationToken
+      });
+
+      if (cookieHandled > 0) {
+        logger?.info(`TabC: Đã hoàn tất xử lý ${cookieHandled} bước "Allow all cookies". Làm mới lại đồng hồ chờ giao diện bảo mật...`, { flow: 'yopmail-muse', step: stepName });
+        startTime = Date.now();
+        continue;
+      }
+    } catch {}
 
     const isLoginOrAuth =
       (await page.locator('input[type="password"], input[name="email"], input[name="pass"]').count().catch(() => 0)) > 0 ||
@@ -2551,6 +2783,449 @@ export async function selectSmsOrWhatsAppOption(options: {
   logger?.info(`TabC: Đã chọn phương thức xác thực SMS hoặc WhatsApp và xác minh trạng thái được chọn thành công.`, { flow: 'yopmail-muse', step: stepName });
 }
 
+export interface EnsureCountryCodeOptions {
+  page: Page;
+  telInput?: Locator;
+  stepName: string;
+  timeoutMs: number;
+  cancellationToken?: AbortSignal | CancellationToken;
+  logger?: Logger;
+}
+
+/**
+ * Kiểm tra mã quốc gia trên giao diện Meta Accounts Center trước khi paste số điện thoại:
+ * - Nếu không phải là (+84) thì click "Change" (hoặc "Thay đổi").
+ * - Đợi popup mở ra, tìm và chọn (+84).
+ * - Sau đó click nút "Save" (hoặc "Lưu") và đợi popup đóng lại.
+ */
+export async function ensureCountryCodeIsVietnam(options: EnsureCountryCodeOptions): Promise<void> {
+  const { page, telInput, stepName, timeoutMs, cancellationToken, logger } = options;
+
+  if (isCancelled(cancellationToken)) {
+    throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC, bước "${stepName}".`);
+  }
+  if (page.isClosed()) {
+    throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trước khi kiểm tra mã quốc gia. Bước: "${stepName}".`);
+  }
+
+  await checkCaptchaOrVerification(page, 'TabC', stepName);
+
+  let container: Page | Locator = page;
+  if (telInput && typeof telInput.locator === 'function') {
+    const scopedDialog = telInput.locator(
+      'xpath=ancestor::*[@role="dialog" or self::form or contains(@class, "dialog") or contains(@class, "modal")][1]'
+    );
+    if ((await scopedDialog.count().catch(() => 0)) > 0) {
+      container = scopedDialog;
+    }
+  }
+
+  interface CountryCodeChangeResult {
+    button: Locator;
+    isAlready84: boolean;
+    countryText: string;
+  }
+
+  const findCountryCodeChange = async (root: Page | Locator): Promise<CountryCodeChangeResult | null> => {
+    const countryCodePattern = /\(\s*\+?\d{1,4}\s*\)/;
+
+    // Chiến lược 1: Tìm từ phần tử chứa mã quốc gia dạng (+xx) (ví dụ: <span ...>China (+86) <div role="button">Change</div></span>)
+    const codeLoc = root.locator('*:has-text("(+")');
+    const codeCount = await codeLoc.count().catch(() => 0);
+    for (let i = 0; i < codeCount; i++) {
+      const cEl = codeLoc.nth(i);
+      if (await cEl.isVisible().catch(() => false)) {
+        const rawText = ((await cEl.textContent().catch(() => '')) || '').trim();
+        if (countryCodePattern.test(rawText)) {
+          // Tìm nút Change nằm bên trong cEl
+          const insideChange = cEl.locator('[role="button"], button, div, span, a');
+          const inCount = await insideChange.count().catch(() => 0);
+          for (let j = 0; j < inCount; j++) {
+            const btn = insideChange.nth(j);
+            if (await btn.isVisible().catch(() => false)) {
+              const bText = ((await btn.innerText().catch(() => '')) || (await btn.textContent().catch(() => '')) || '').trim();
+              if (/^(Change|Thay đổi)$/i.test(bText) || bText.toLowerCase() === 'change' || bText.toLowerCase() === 'thay đổi') {
+                const is84 = /\(\s*\+?84\s*\)/.test(rawText) || rawText.includes('(+84)');
+                const match = rawText.match(/([a-zA-ZÀ-ỹ\s]*\(\s*\+?\d{1,4}\s*\))/);
+                const countryDisplay = match ? match[1].trim() : rawText.replace(/\s+/g, ' ').slice(0, 40);
+                return {
+                  button: btn,
+                  isAlready84: is84,
+                  countryText: countryDisplay
+                };
+              }
+            }
+          }
+
+          // Tìm nút Change là sibling của cEl
+          if (typeof cEl.locator === 'function') {
+            const siblingChange = cEl.locator('xpath=following-sibling::*//*[@role="button" or self::button or self::div or self::span][has-text("Change") or has-text("Thay đổi")] | xpath=following-sibling::*[@role="button" or self::button or self::div or self::span][has-text("Change") or has-text("Thay đổi")]');
+            const sibCount = await siblingChange.count().catch(() => 0);
+            for (let k = 0; k < sibCount; k++) {
+              const sBtn = siblingChange.nth(k);
+              if (await sBtn.isVisible().catch(() => false)) {
+                const is84 = /\(\s*\+?84\s*\)/.test(rawText) || rawText.includes('(+84)');
+                const match = rawText.match(/([a-zA-ZÀ-ỹ\s]*\(\s*\+?\d{1,4}\s*\))/);
+                const countryDisplay = match ? match[1].trim() : rawText.replace(/\s+/g, ' ').slice(0, 40);
+                return {
+                  button: sBtn,
+                  isAlready84: is84,
+                  countryText: countryDisplay
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Chiến lược 2: Duyệt qua tất cả các nút có text "Change" / "Thay đổi" và kiểm tra xem có ngang hàng với (+xx) không
+    const changeSelectors = [
+      '[role="button"]:has-text("Change")',
+      '[role="button"]:has-text("Thay đổi")',
+      'button:has-text("Change")',
+      'button:has-text("Thay đổi")',
+      'div[role="button"]:has-text("Change")',
+      'div[role="button"]:has-text("Thay đổi")',
+      'span:has-text("Change")',
+      'span:has-text("Thay đổi")',
+      'a:has-text("Change")',
+      'a:has-text("Thay đổi")'
+    ];
+
+    for (const sel of changeSelectors) {
+      const loc = root.locator(sel);
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const item = loc.nth(i);
+        if (await item.isVisible().catch(() => false)) {
+          const btnText = ((await item.innerText().catch(() => '')) || (await item.textContent().catch(() => '')) || '').trim();
+          if (/^(Change|Thay đổi)$/i.test(btnText) || btnText.toLowerCase() === 'change' || btnText.toLowerCase() === 'thay đổi') {
+            // Kiểm tra context ngang hàng: parent, grandparent, preceding-sibling
+            let parentText = '';
+            let grandParentText = '';
+            let precedingText = '';
+            if (typeof item.locator === 'function') {
+              parentText = (await item.locator('xpath=..').textContent().catch(() => '')) || '';
+              grandParentText = (await item.locator('xpath=../..').textContent().catch(() => '')) || '';
+              precedingText = (await item.locator('xpath=preceding-sibling::*[1]').textContent().catch(() => '')) || '';
+            }
+            const contextText = `${parentText} ${grandParentText} ${precedingText}`;
+
+            // CHỈ CHẤP NHẬN NẾU CONTEXT CHỨA MÃ QUỐC GIA DẠNG (+xx)
+            if (countryCodePattern.test(contextText)) {
+              const is84 = /\(\s*\+?84\s*\)/.test(contextText) || contextText.includes('(+84)');
+              const match = contextText.match(/([a-zA-ZÀ-ỹ\s]*\(\s*\+?\d{1,4}\s*\))/);
+              const countryDisplay = match ? match[1].trim() : contextText.replace(/\s+/g, ' ').slice(0, 40);
+              return {
+                button: item,
+                isAlready84: is84,
+                countryText: countryDisplay
+              };
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  };
+
+  let changeResult = await findCountryCodeChange(container);
+  if (!changeResult && container !== page) {
+    changeResult = await findCountryCodeChange(page);
+  }
+
+  // Nếu chưa phát hiện ngay, thăm dò nhanh tối đa 1000ms
+  if (!changeResult) {
+    const changeStartTime = Date.now();
+    const maxWaitMs = Math.min(timeoutMs, 1000);
+    while (Date.now() - changeStartTime < maxWaitMs) {
+      if (isCancelled(cancellationToken) || page.isClosed()) break;
+      await new Promise((r) => setTimeout(r, 100));
+      changeResult = await findCountryCodeChange(container);
+      if (!changeResult && container !== page) {
+        changeResult = await findCountryCodeChange(page);
+      }
+      if (changeResult) break;
+    }
+  }
+
+  if (!changeResult) {
+    logger?.info(
+      `TabC: Không phát hiện nút "Change" ("Thay đổi") ngang hàng với mã quốc gia (+xx) trên form. Bỏ qua bước đổi mã quốc gia. Bước: "${stepName}".`,
+      { flow: 'yopmail-muse', step: stepName }
+    );
+    return;
+  }
+
+  const { button: changeBtn, isAlready84, countryText } = changeResult;
+
+  if (isAlready84) {
+    logger?.info(
+      `TabC: Mã quốc gia hiện tại đã là (+84) (${countryText}). Không cần click Change. Bước: "${stepName}".`,
+      { flow: 'yopmail-muse', step: stepName }
+    );
+    return;
+  }
+
+  logger?.info(
+    `TabC: Phát hiện mã quốc gia hiện tại không phải (+84) (${countryText}). Đang click nút "Change" ngang hàng với (+xx)... Bước: "${stepName}".`,
+    { flow: 'yopmail-muse', step: stepName }
+  );
+
+  if (typeof changeBtn.scrollIntoViewIfNeeded === 'function') {
+    await changeBtn.scrollIntoViewIfNeeded().catch(() => {});
+  }
+
+  try {
+    await changeBtn.click({ timeout: 3000 });
+  } catch {
+    if (typeof changeBtn.evaluate === 'function') {
+      await changeBtn.evaluate((el: HTMLElement) => el.click()).catch(() => {});
+    }
+  }
+
+  logger?.info(
+    `TabC: Đang chờ popup chọn mã quốc gia mở ra... Bước: "${stepName}".`,
+    { flow: 'yopmail-muse', step: stepName }
+  );
+
+  const popupStartTime = Date.now();
+  const popupTimeoutMs = Math.min(timeoutMs, 15000);
+  let popupOpened = false;
+
+  while (Date.now() - popupStartTime < popupTimeoutMs) {
+    if (isCancelled(cancellationToken)) {
+      throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC, bước "${stepName}".`);
+    }
+    if (page.isClosed()) {
+      throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trong khi chờ popup mã quốc gia. Bước: "${stepName}".`);
+    }
+
+    await checkCaptchaOrVerification(page, 'TabC', stepName);
+
+    const searchLoc = page.locator(
+      'input[type="search"], input[placeholder*="Search" i], input[placeholder*="Tìm kiếm" i], input[aria-label*="Search" i], input[aria-label*="Tìm kiếm" i]'
+    );
+    const searchCount = await searchLoc.count().catch(() => 0);
+    for (let i = 0; i < searchCount; i++) {
+      if (await searchLoc.nth(i).isVisible().catch(() => false)) {
+        popupOpened = true;
+        break;
+      }
+    }
+
+    if (!popupOpened) {
+      const saveLoc = page.locator(
+        'button:has-text("Save"), button:has-text("Lưu"), [role="button"]:has-text("Save"), [role="button"]:has-text("Lưu")'
+      );
+      const saveCount = await saveLoc.count().catch(() => 0);
+      for (let i = 0; i < saveCount; i++) {
+        if (await saveLoc.nth(i).isVisible().catch(() => false)) {
+          popupOpened = true;
+          break;
+        }
+      }
+    }
+
+    if (!popupOpened) {
+      const option84 = page.locator('*:has-text("(+84)")');
+      const opt84Count = await option84.count().catch(() => 0);
+      for (let i = 0; i < opt84Count; i++) {
+        if (await option84.nth(i).isVisible().catch(() => false)) {
+          popupOpened = true;
+          break;
+        }
+      }
+    }
+
+    if (!popupOpened) {
+      const dialogLoc = page.locator('[role="dialog"]');
+      if ((await dialogLoc.count().catch(() => 0)) > 1) {
+        popupOpened = true;
+        break;
+      }
+    }
+
+    if (popupOpened) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (!popupOpened) {
+    throw new Error(
+      `[LỖI TIMEOUT] TabC: Quá thời gian (${popupTimeoutMs}ms) khi chờ popup chọn mã quốc gia mở ra sau khi click Change. Bước: "${stepName}".`
+    );
+  }
+
+  logger?.info(
+    `TabC: Popup chọn mã quốc gia đã mở. Đang tìm và chọn (+84)... Bước: "${stepName}".`,
+    { flow: 'yopmail-muse', step: stepName }
+  );
+
+  // Nếu có ô tìm kiếm, nhập "84" (hoặc "Vietnam") để lọc nhanh
+  const searchCandidates = [
+    'input[type="search"]',
+    'input[placeholder*="Search" i]',
+    'input[placeholder*="Tìm kiếm" i]',
+    'input[aria-label*="Search" i]',
+    'input[aria-label*="Tìm kiếm" i]'
+  ];
+  let searchInput: Locator | null = null;
+  for (const sSel of searchCandidates) {
+    const loc = page.locator(sSel);
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const item = loc.nth(i);
+      if (await item.isVisible().catch(() => false)) {
+        searchInput = item;
+        break;
+      }
+    }
+    if (searchInput) break;
+  }
+
+  if (searchInput) {
+    logger?.info('TabC: Đang nhập "84" vào ô tìm kiếm quốc gia...', { flow: 'yopmail-muse', step: stepName });
+    await searchInput.fill('84');
+    await new Promise((r) => setTimeout(r, 300));
+
+    const count84 = await page.locator('*:has-text("(+84)")').count().catch(() => 0);
+    if (count84 === 0) {
+      logger?.info('TabC: Tìm "84" chưa ra kết quả, đang thử nhập "Vietnam"...', { flow: 'yopmail-muse', step: stepName });
+      await searchInput.fill('Vietnam');
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  // Tìm lựa chọn (+84) trong popup
+  const optionSelectors = [
+    '[role="radio"]:has-text("(+84)")',
+    '[role="option"]:has-text("(+84)")',
+    'label:has-text("(+84)")',
+    'button:has-text("(+84)")',
+    '[role="button"]:has-text("(+84)")',
+    'div:has-text("(+84)")',
+    'span:has-text("(+84)")',
+    '*:has-text("(+84)")',
+    '*:has-text("+84")'
+  ];
+
+  let targetOption: Locator | null = null;
+  const selectStartTime = Date.now();
+  const selectTimeoutMs = Math.min(timeoutMs, 10000);
+
+  while (Date.now() - selectStartTime < selectTimeoutMs) {
+    if (isCancelled(cancellationToken)) {
+      throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC, bước "${stepName}".`);
+    }
+
+    for (const oSel of optionSelectors) {
+      const loc = page.locator(oSel);
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const item = loc.nth(i);
+        if (await item.isVisible().catch(() => false)) {
+          const text = ((await item.innerText().catch(() => '')) || (await item.textContent().catch(() => '')) || '').trim();
+          if (text.includes('(+84)') || text.includes('+84')) {
+            let interactive: Locator | null = null;
+            if (typeof item.locator === 'function') {
+              const ancestorLoc = item.locator(
+                'xpath=ancestor-or-self::*[@role="radio" or @role="option" or @role="button" or self::label or self::button][1]'
+              );
+              if ((await ancestorLoc.count().catch(() => 0)) > 0 && (await ancestorLoc.isVisible().catch(() => false))) {
+                interactive = ancestorLoc;
+              }
+            }
+            targetOption = interactive || item;
+            break;
+          }
+        }
+      }
+      if (targetOption) break;
+    }
+
+    if (targetOption) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (!targetOption) {
+    throw new Error(
+      `[LỖI CHỌN MÃ QUỐC GIA] TabC: Không tìm thấy lựa chọn (+84) trong popup quốc gia. Bước: "${stepName}".`
+    );
+  }
+
+  logger?.info('TabC: Đang click chọn mã quốc gia (+84)...', { flow: 'yopmail-muse', step: stepName });
+  if (typeof targetOption.scrollIntoViewIfNeeded === 'function') {
+    await targetOption.scrollIntoViewIfNeeded().catch(() => {});
+  }
+  await targetOption.click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  logger?.info('TabC: Đang tìm và bấm nút "Save" ("Lưu")...', { flow: 'yopmail-muse', step: stepName });
+
+  let saveBtn: Locator | null = null;
+  const saveStartTime = Date.now();
+  const saveTimeoutMs = Math.min(timeoutMs, 10000);
+
+  while (Date.now() - saveStartTime < saveTimeoutMs) {
+    if (isCancelled(cancellationToken)) {
+      throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC, bước "${stepName}".`);
+    }
+    if (page.isClosed()) {
+      throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trong khi chờ nút Save. Bước: "${stepName}".`);
+    }
+
+    const saveSelectors = [
+      'button:has-text("Save")',
+      'button:has-text("Lưu")',
+      '[role="button"]:has-text("Save")',
+      '[role="button"]:has-text("Lưu")',
+      'div[role="button"]:has-text("Save")',
+      'div[role="button"]:has-text("Lưu")',
+      'span:has-text("Save")',
+      'span:has-text("Lưu")'
+    ];
+
+    for (const sSel of saveSelectors) {
+      const loc = page.locator(sSel);
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const b = loc.nth(i);
+        const isVis = await b.isVisible().catch(() => false);
+        const isEn = await b.isEnabled().catch(() => false);
+        if (isVis && isEn) {
+          const text = ((await b.innerText().catch(() => '')) || (await b.textContent().catch(() => '')) || '').trim();
+          if (/^(Save|Lưu)$/i.test(text) || text.toLowerCase().includes('save') || text.toLowerCase().includes('lưu')) {
+            saveBtn = b;
+            break;
+          }
+        }
+      }
+      if (saveBtn) break;
+    }
+
+    if (saveBtn) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (!saveBtn) {
+    throw new Error(
+      `[LỖI TIMEOUT] TabC: Quá thời gian (${saveTimeoutMs}ms) khi chờ nút "Save" / "Lưu" sẵn sàng bấm trong popup quốc gia. Bước: "${stepName}".`
+    );
+  }
+
+  await saveBtn.click();
+  logger?.info('TabC: Đã click nút "Save" / "Lưu". Chờ popup đóng...', { flow: 'yopmail-muse', step: stepName });
+
+  if (typeof saveBtn.waitFor === 'function') {
+    await saveBtn.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  }
+  await new Promise((r) => setTimeout(r, 400));
+
+  logger?.info('TabC: Đã chọn mã quốc gia (+84) và lưu thành công.', { flow: 'yopmail-muse', step: stepName });
+}
+
 /**
  * Nhập số điện thoại vào ô input[type="tel"] trên TabC.
  */
@@ -2565,6 +3240,15 @@ export async function inputPhoneNumberOnTabC(options: {
   const { page, stepName, phone, timeoutMs, cancellationToken, logger } = options;
   const telSelector = 'input[type="tel"]';
 
+  // Trước khi paste số điện thoại lần 1: Check và chọn (+84) ngay lập tức
+  await ensureCountryCodeIsVietnam({
+    page,
+    stepName,
+    timeoutMs,
+    cancellationToken,
+    logger
+  });
+
   logger?.info(`TabC: Đang chờ ô nhập số điện thoại "${telSelector}" hiển thị...`, { flow: 'yopmail-muse', step: stepName });
 
   const telInput = await waitForSingleMatchingElement({
@@ -2577,14 +3261,6 @@ export async function inputPhoneNumberOnTabC(options: {
     cancellationToken,
     logger
   });
-
-  const countryDropdown = page.locator('select[aria-label*="quốc gia" i], select[aria-label*="country" i], [role="combobox"][aria-label*="quốc gia" i]');
-  const countryCount = await countryDropdown.count().catch(() => 0);
-  if (countryCount > 0 && !phone.startsWith('+')) {
-    throw new Error(
-      `[YÊU CẦU CẤU HÌNH QUỐC GIA] TabC: Form yêu cầu chọn quốc gia riêng biệt nhưng số điện thoại "${maskPhoneNumber(phone)}" không bắt đầu bằng mã quốc gia "+" và hệ thống chưa có cấu hình quốc gia. Dừng luồng để tránh chọn sai quốc gia. Bước: "${stepName}".`
-    );
-  }
 
   await telInput.click();
   await telInput.fill(phone);
@@ -3241,10 +3917,24 @@ export async function inputReenterPhoneOnTabC(options: {
     );
   }
 
+  // Check và chọn mã quốc gia (+84) ngay lập tức khi vào form Add mobile number
+  logger?.info(`TabC: Kiểm tra và chọn mã quốc gia (+84) ngay cho form Add mobile number...`, {
+    flow: 'yopmail-muse',
+    step: stepName
+  });
+
+  await ensureCountryCodeIsVietnam({
+    page,
+    stepName,
+    timeoutMs: Math.min(timeoutMs, 10000),
+    cancellationToken,
+    logger
+  });
+
   const startTime = Date.now();
   const pollIntervalMs = 200;
 
-  logger?.info(`TabC: Đang chờ ô input[type="tel"] của form Add mobile number hiển thị và có thể nhập...`, {
+  logger?.info(`TabC: Đang chờ ô input nhập số điện thoại của form Add mobile number sẵn sàng...`, {
     flow: 'yopmail-muse',
     step: stepName
   });
@@ -3256,63 +3946,66 @@ export async function inputReenterPhoneOnTabC(options: {
       throw new Error(`[HỦY BỎ] Luồng nhận tín hiệu dừng tại TabC, bước "${stepName}".`);
     }
     if (page.isClosed()) {
-      throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trong khi chờ input[type="tel"]. Bước: "${stepName}".`);
+      throw new Error(`[LỖI TAB ĐÃ ĐÓNG] TabC đã bị đóng trong khi chờ ô nhập số điện thoại. Bước: "${stepName}".`);
     }
 
     await checkCaptchaOrVerification(page, 'TabC', stepName);
 
-    const telLoc = page.locator('input[type="tel"]');
-    const count = await telLoc.count().catch(() => 0);
+    const candidateSelectors = [
+      'input[type="tel"]',
+      'input[autocomplete="tel"]',
+      'input[name*="phone" i]',
+      'input[name*="mobile" i]',
+      'input[placeholder*="mobile" i]',
+      'input[placeholder*="phone" i]',
+      'input[placeholder*="di động" i]',
+      'input[placeholder*="điện thoại" i]'
+    ];
 
-    if (count > 0) {
-      const visibleInputs: Locator[] = [];
+    const visibleInputs: Locator[] = [];
+    for (const sel of candidateSelectors) {
+      const telLoc = page.locator(sel);
+      const count = await telLoc.count().catch(() => 0);
       for (let i = 0; i < count; i++) {
         const item = telLoc.nth(i);
-        const isVis = await item.isVisible().catch(() => false);
-        if (isVis) {
+        if (await item.isVisible().catch(() => false)) {
           visibleInputs.push(item);
         }
       }
+      if (visibleInputs.length > 0) break;
+    }
 
-      if (visibleInputs.length === 1) {
-        const item = visibleInputs[0];
-        const isEditable = await item.isEditable().catch(() => false);
-        const isEnabled = await item.isEnabled().catch(() => false);
-        if (isEditable && isEnabled) {
-          targetTelInput = item;
-          break;
-        }
-      } else if (visibleInputs.length > 1) {
-        // Nếu có nhiều hơn 1 input[type="tel"] hiển thị, xác định input thuộc form "Add mobile number"
-        const formScopedInputs: Locator[] = [];
-        for (const item of visibleInputs) {
-          const inAddMobileForm = await item
+    if (visibleInputs.length === 1) {
+      const item = visibleInputs[0];
+      const isEditable = await item.isEditable().catch(() => true);
+      const isEnabled = await item.isEnabled().catch(() => true);
+      if (isEditable && isEnabled) {
+        targetTelInput = item;
+        break;
+      }
+    } else if (visibleInputs.length > 1) {
+      // Nếu có nhiều hơn 1 input hiển thị, xác định input thuộc form "Add mobile number"
+      for (const item of visibleInputs) {
+        let inAddMobile = false;
+        if (typeof item.evaluate === 'function') {
+          inAddMobile = await item
             .evaluate((el: HTMLElement) => {
-              const formOrDialog = el.closest('[role="dialog"], form, [role="presentation"], div');
+              const formOrDialog = el.closest('[role="dialog"], form, [aria-modal="true"]');
               const text = formOrDialog?.textContent || '';
               return /Add mobile number|Thêm số di động|Add mobile|Mobile number/i.test(text);
             })
             .catch(() => false);
-          if (inAddMobileForm) {
-            formScopedInputs.push(item);
-          }
         }
-
-        if (formScopedInputs.length === 1) {
-          const item = formScopedInputs[0];
-          const isEditable = await item.isEditable().catch(() => false);
-          const isEnabled = await item.isEnabled().catch(() => false);
-          if (isEditable && isEnabled) {
-            targetTelInput = item;
-            break;
-          }
-        } else {
-          throw new Error(
-            `[LỖI SELECTOR] TabC: Có ${visibleInputs.length} ô input[type="tel"] hiển thị. ` +
-            `Không thể xác định duy nhất ô nhập thuộc form "Add mobile number". Không dùng .first() tùy tiện để che sự mơ hồ. Bước: "${stepName}".`
-          );
+        if (inAddMobile) {
+          targetTelInput = item;
+          break;
         }
       }
+
+      if (!targetTelInput && visibleInputs.length > 0) {
+        targetTelInput = visibleInputs[0];
+      }
+      if (targetTelInput) break;
     }
 
     await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -3320,7 +4013,7 @@ export async function inputReenterPhoneOnTabC(options: {
 
   if (!targetTelInput) {
     throw new Error(
-      `[LỖI TIMEOUT] TabC: Quá thời gian (${timeoutMs}ms) khi chờ ô input[type="tel"] hiển thị và có thể nhập. Bước: "${stepName}".`
+      `[LỖI TIMEOUT] TabC: Quá thời gian (${timeoutMs}ms) khi chờ ô input nhập số điện thoại của form Add mobile number. Bước: "${stepName}".`
     );
   }
 
@@ -3493,141 +4186,6 @@ export async function activateTabB(options: {
   return rawUrl.trim();
 }
 
-export interface ReloadTabBOptions {
-  browserManager?: any;
-  tabBUrl: string;
-  existingTabB?: Page;
-  stepName: string;
-  timeoutMs: number;
-  logger?: Logger;
-  flowName?: string;
-}
-
-/**
- * Tải lại trang TabB qua proxy theo đúng yêu cầu:
- * - Trường hợp Chrome vừa restart:
- *   + Không gọi reload() hoặc bringToFront() trên TabB cũ.
- *   + Tạo Page mới trong context mới.
- *   + Đăng ký lại Page này dưới tên TabB trong bộ quản lý tab.
- *   + Truy cập tabBUrl bằng goto(..., { waitUntil: 'domcontentloaded' }).
- *   + Không tự khôi phục TabA hoặc TabC.
- *   + Không tự phát lại click, POST hoặc biểu mẫu.
- *   + Đưa TabB hiện tại lên trước bằng bringToFront().
- * - Trường hợp proxy đã bật và Chrome không restart:
- *   + Dùng TabB hiện tại.
- *   + Gọi TabB.reload({ waitUntil: 'domcontentloaded' }).
- *   + Không dùng phím F5 hệ điều hành.
- *   + Đưa TabB hiện tại lên trước bằng bringToFront().
- * - Kiểm tra CAPTCHA / bảo mật (dừng chờ người dùng xử lý thủ công nếu gặp).
- * - Báo thông điệp kết thúc: "Đã bật chế độ proxy và tải lại trang TabB."
- */
-export async function reloadTabBThroughProxy(options: ReloadTabBOptions): Promise<Page> {
-  const { browserManager, tabBUrl, existingTabB, stepName, timeoutMs, logger, flowName = 'yopmail-muse' } = options;
-
-  if (!tabBUrl || typeof tabBUrl !== 'string' || !tabBUrl.trim()) {
-    throw new Error(`[LỖI URL TAB B] URL để tải lại TabB không được để trống. Bước: "${stepName}".`);
-  }
-
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(tabBUrl.trim());
-  } catch {
-    throw new Error(`[LỖI URL TAB B] URL không hợp lệ: "${sanitizeUrl(tabBUrl)}". Bước: "${stepName}".`);
-  }
-
-  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-    throw new Error(
-      `[LỖI URL TAB B] URL không sử dụng giao thức http hoặc https ("${parsedUrl.protocol}"). Bước: "${stepName}".`
-    );
-  }
-
-  const safeUrlForLog = `${parsedUrl.origin}${parsedUrl.pathname}`;
-
-  // Kiểm tra xem TabB cũ còn khả dụng và chưa bị đóng hay không (trường hợp không restart Chrome)
-  const isExistingTabBAlive = existingTabB && typeof existingTabB.isClosed === 'function' && !existingTabB.isClosed();
-
-  let targetTabB: Page;
-
-  if (isExistingTabBAlive) {
-    // Trường hợp proxy đã bật và Chrome không restart:
-    // Dùng TabB hiện tại, gọi TabB.reload() để thực hiện yêu cầu tải lại như F5.
-    logger?.info(
-      `TabB: Đang tải lại TabB (reload) tới URL: ${safeUrlForLog}...`,
-      { flow: flowName, step: stepName }
-    );
-    await existingTabB.reload({
-      waitUntil: 'domcontentloaded',
-      timeout: timeoutMs
-    });
-
-    if (typeof existingTabB.bringToFront === 'function') {
-      await existingTabB.bringToFront();
-    }
-
-    targetTabB = existingTabB;
-  } else {
-    // Trường hợp Chrome vừa restart:
-    // Tuyệt đối không gọi reload() hoặc bringToFront() trên TabB cũ đã đóng.
-    if (!browserManager) {
-      throw new Error(
-        `[LỖI RUNNER] BrowserManager không khả dụng để tạo TabB mới sau khi restart Chrome. Bước: "${stepName}".`
-      );
-    }
-
-    logger?.info(
-      `TabB: Chrome vừa khởi động lại với cấu hình proxy. Đang tạo TabB mới trong context mới và truy cập URL: ${safeUrlForLog}...`,
-      { flow: flowName, step: stepName }
-    );
-
-    // Tạo Page mới trong context mới
-    const newPage: Page = typeof browserManager.newPage === 'function'
-      ? await browserManager.newPage('TabB')
-      : await browserManager.getSession().context.newPage();
-
-    // Đăng ký lại Page này dưới tên TabB trong bộ quản lý tab
-    if (typeof browserManager.registerPage === 'function') {
-      browserManager.registerPage('TabB', newPage);
-    }
-
-    // Đóng tab trắng mặc định 'default' nếu có và đang ở about:blank
-    try {
-      if (typeof browserManager.getPage === 'function') {
-        const defaultPage = browserManager.getPage('default');
-        if (defaultPage && !defaultPage.isClosed() && defaultPage !== newPage) {
-          const dUrl = typeof defaultPage.url === 'function' ? defaultPage.url() : '';
-          if (!dUrl || dUrl === 'about:blank') {
-            await defaultPage.close().catch(() => {});
-          }
-        }
-      }
-    } catch {
-      // Bỏ qua lỗi đóng tab mặc định
-    }
-
-    // Truy cập tabBUrl bằng goto()
-    await newPage.goto(tabBUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: timeoutMs
-    });
-
-    // Đưa TabB hiện tại lên trước để quan sát
-    if (typeof newPage.bringToFront === 'function') {
-      await newPage.bringToFront();
-    }
-
-    targetTabB = newPage;
-  }
-
-  // Kiểm tra nếu gặp đăng nhập lại hoặc xác minh người dùng (CAPTCHA, Cloudflare, ...)
-  await checkCaptchaOrVerification(targetTabB, 'TabB', stepName);
-
-  const completionMsg = 'Đã bật chế độ proxy và tải lại trang TabB.';
-  logger?.info(completionMsg, { flow: flowName, step: stepName });
-  console.log(completionMsg);
-
-  return targetTabB;
-}
-
 /**
  * Luồng tuần tự hai tab tích hợp Temp-Mail:
  * TabA mở Temp-Mail (https://temp-mail.io/vi) lấy địa chỉ email;
@@ -3660,9 +4218,15 @@ export const yopmailMuseFlow: Flow = {
         if (tabA.isClosed()) {
           throw new Error('[LỖI TAB ĐÃ ĐÓNG] TabA đã bị đóng trước khi truy cập URL. Bước: "tabA-tempmail".');
         }
-        await tabA.goto('https://temp-mail.io/vi', {
+        await safeGoto(tabA, 'https://temp-mail.io/vi', {
           waitUntil: 'domcontentloaded',
-          timeout: context.config.navigationTimeoutMs
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'yopmail-muse',
+          stepName: 'tabA-tempmail'
         });
         if (tabA.isClosed()) {
           throw new Error('[LỖI TAB ĐÃ ĐÓNG] TabA đã bị đóng sau khi tải trang. Bước: "tabA-tempmail".');
@@ -3711,9 +4275,15 @@ export const yopmailMuseFlow: Flow = {
         if (tabB.isClosed()) {
           throw new Error('[LỖI TAB ĐÃ ĐÓNG] TabB đã bị đóng trước khi tải URL. Không tự tạo tab thay thế. Bước: "tabB-muse".');
         }
-        await tabB.goto('https://muse.ai/', {
+        await safeGoto(tabB, 'https://muse.ai/', {
           waitUntil: 'domcontentloaded',
-          timeout: context.config.navigationTimeoutMs
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'yopmail-muse',
+          stepName: 'tabB-muse'
         });
         if (tabB.isClosed()) {
           throw new Error('[LỖI TAB ĐÃ ĐÓNG] TabB đã bị đóng sau khi tải URL. Không tự tạo tab thay thế. Bước: "tabB-muse".');
@@ -4238,6 +4808,10 @@ export const yopmailMuseFlow: Flow = {
         state.tabC = tabC;
         context.page = tabC;
 
+        if (typeof tabC.bringToFront === 'function') {
+          await tabC.bringToFront().catch(() => {});
+        }
+
         if (typeof tabC.setDefaultTimeout === 'function') {
           tabC.setDefaultTimeout(context.config.actionTimeoutMs);
         }
@@ -4251,7 +4825,25 @@ export const yopmailMuseFlow: Flow = {
           step: 'tabC-open-meta-security'
         });
 
-        await tabC.goto(metaUrl, { timeout: context.config.navigationTimeoutMs });
+        await safeGoto(tabC, metaUrl, {
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'yopmail-muse',
+          stepName: 'tabC-open-meta-security'
+        });
+
+        // Xử lý cookie consent trên TabC nếu có (tối đa 2 bước bấm "Allow all cookies", mỗi lần bấm đợi trang load xong)
+        await handleMetaCookieConsent({
+          page: tabC,
+          stepName: 'tabC-open-meta-security',
+          maxSteps: 2,
+          timeoutPerStepMs: 4000,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken
+        });
 
         await waitForMetaSecurityPageReady({
           page: tabC,
@@ -4664,90 +5256,23 @@ export const yopmailMuseFlow: Flow = {
         context.page = tabB;
         state.tabBUrl = tabBUrl;
         state.tabBReactivated = true;
+
+        // Đảm bảo email sau khi hoàn tất xác thực được lưu vào danh sách txt output
+        if (state.emailAddress) {
+          await saveEmailToOutputFile(state.emailAddress, {
+            filePath: context.config.outputEmailsFile,
+            logger: context.logger
+          }).catch(() => {});
+        }
+
+        context.logger.info(
+          '✔ [XÁC THỰC HOÀN TẤT] Đã hoàn thành các bước xác thực tài khoản! Tab B đã được kích hoạt trên màn hình (không reload Tab B).',
+          { flow: 'yopmail-muse', step: 'tabB-activate' }
+        );
       },
       verify: async (context: FlowContext) => {
         const state = getYopmailMuseState(context);
         return Boolean(state.tabBReactivated === true && state.tabBUrl && state.tabB && !state.tabB.isClosed());
-      }
-    },
-    {
-      id: 'tabB-enable-proxy',
-      name: 'Bật proxy bằng module chuyển kết nối hiện có',
-      execute: async (context: FlowContext) => {
-        const bm = context.browserManager;
-        if (!bm) {
-          throw new Error('[LỖI RUNNER] BrowserManager không khả dụng trong FlowContext. Bước: "tabB-enable-proxy".');
-        }
-
-        const state = getYopmailMuseState(context);
-        const modeBefore = bm.getConnectionMode();
-
-        // Kiểm tra cấu hình proxy trước khi đóng Chrome
-        const proxyConfig = context.config.proxy;
-        if (!proxyConfig || !proxyConfig.server || !proxyConfig.server.trim()) {
-          throw new Error(
-            '[LỖI CẤU HÌNH PROXY] Không thể bật proxy vì "proxy.server" chưa được cấu hình.\n' +
-            'Dừng luồng ngay lập tức, tuyệt đối không tự động fallback sang kết nối trực tiếp.'
-          );
-        }
-
-        context.logger.info(
-          `Đang kích hoạt module chuyển kết nối sang "proxy" (chế độ hiện tại: "${modeBefore}")...`,
-          { flow: 'yopmail-muse', step: 'tabB-enable-proxy' }
-        );
-
-        // Chuyển kết nối sang proxy bằng module chuyển kết nối hiện có
-        await bm.switchConnectionMode('proxy');
-
-        state.tabA = undefined;
-        state.tabC = undefined;
-        // Nếu TabB cũ đã bị đóng (do restart Chrome hoặc đổi context), vô hiệu hóa tham chiếu cũ
-        if (state.tabB && typeof state.tabB.isClosed === 'function' && state.tabB.isClosed()) {
-          state.tabB = undefined;
-        } else if (!state.tabB) {
-          state.tabB = bm.getPage('TabB');
-        }
-        if (state.tabB) {
-          context.page = state.tabB;
-        }
-
-        state.proxyEnabled = true;
-      },
-      verify: async (context: FlowContext) => {
-        const state = getYopmailMuseState(context);
-        const isProxy = context.browserManager ? context.browserManager.getConnectionMode() === 'proxy' : false;
-        return Boolean(state.proxyEnabled === true && isProxy);
-      }
-    },
-    {
-      id: 'tabB-reload-proxy',
-      name: 'Tải lại trang TabB qua proxy',
-      execute: async (context: FlowContext) => {
-        const state = getYopmailMuseState(context);
-        if (!state.tabBUrl) {
-          throw new Error(
-            '[LỖI TRẠNG THÁI] Không tìm thấy URL của TabB (tabBUrl) đã lưu để tải lại qua proxy. Bước: "tabB-reload-proxy".'
-          );
-        }
-
-        const bm = context.browserManager;
-        const targetPage = await reloadTabBThroughProxy({
-          browserManager: bm,
-          tabBUrl: state.tabBUrl,
-          existingTabB: state.tabB,
-          stepName: 'tabB-reload-proxy',
-          timeoutMs: context.config.navigationTimeoutMs,
-          logger: context.logger,
-          flowName: 'yopmail-muse'
-        });
-
-        state.tabB = targetPage;
-        context.page = targetPage;
-        state.tabBReloaded = true;
-      },
-      verify: async (context: FlowContext) => {
-        const state = getYopmailMuseState(context);
-        return Boolean(state.tabBReloaded === true && state.tabB && !state.tabB.isClosed());
       }
     }
   ]

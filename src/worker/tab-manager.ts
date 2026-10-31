@@ -1,5 +1,6 @@
 import { BrowserContext, Page } from 'playwright';
 import { WorkerLogger } from '../utils/worker-logger';
+import { safeGoto } from '../browser/navigation';
 
 export interface TabManagerOptions {
   workerId: string;
@@ -57,9 +58,10 @@ export class TabManager {
     this.logger?.info(`Đã tạo tab [${trimmedName}] trong context của worker ${this.workerId}.`);
 
     if (url) {
-      await page.goto(url, {
+      await safeGoto(page, url, {
         waitUntil: 'domcontentloaded',
-        timeout: this.navigationTimeoutMs
+        timeout: this.navigationTimeoutMs,
+        logger: this.logger
       });
       this.logger?.info(`Tab [${trimmedName}] đã mở URL: ${url}`);
     }

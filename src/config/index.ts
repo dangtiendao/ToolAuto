@@ -10,7 +10,10 @@ import {
   SelectedProfile,
   JobConfig,
   RawJobConfig,
-  BrowserMode
+  BrowserMode,
+  ProxyConfig,
+  WindowSizeConfig,
+  WindowPositionConfig
 } from './types';
 import { getFlow } from '../flows/registry';
 
@@ -345,6 +348,30 @@ export function validateConfig(
     );
   }
 
+  // 5b. Kiểm tra pageLoadMaxRetries (mặc định là 3, số nguyên không âm)
+  const pageLoadMaxRetries = rawConfig.pageLoadMaxRetries ?? 3;
+  if (
+    typeof pageLoadMaxRetries !== 'number' ||
+    !Number.isInteger(pageLoadMaxRetries) ||
+    pageLoadMaxRetries < 0
+  ) {
+    errors.push(
+      `"pageLoadMaxRetries" phải là số nguyên không âm (>= 0). Nhận được: ${pageLoadMaxRetries}`
+    );
+  }
+
+  // 5c. Kiểm tra pageLoadRetryDelayMs (mặc định là 3000ms = 3 giây, số nguyên không âm)
+  const pageLoadRetryDelayMs = rawConfig.pageLoadRetryDelayMs ?? 3000;
+  if (
+    typeof pageLoadRetryDelayMs !== 'number' ||
+    !Number.isInteger(pageLoadRetryDelayMs) ||
+    pageLoadRetryDelayMs < 0
+  ) {
+    errors.push(
+      `"pageLoadRetryDelayMs" phải là số nguyên không âm (>= 0). Nhận được: ${pageLoadRetryDelayMs}`
+    );
+  }
+
   // 6. Kiểm tra flowName
   const flowName =
     typeof rawConfig.flowName === 'string' && rawConfig.flowName.trim()
@@ -390,7 +417,7 @@ export function validateConfig(
     }
   }
 
-  // 9. Kiểm tra Proxy
+  // 9. Kiểm tra Proxy (Loại 1: Mặc định cho khởi tạo lần đầu)
   const rawProxy = rawConfig.proxy;
   const isProxyExplicitlyEnabled = rawProxy?.enabled === true;
   const isInitialProxy = initialConnectionMode === 'proxy';
@@ -413,21 +440,31 @@ export function validateConfig(
     env.PROXY_PASSWORD ||
     undefined;
 
-  // Hỗ trợ định dạng host:port:username:password phổ biến
+  // Hỗ trợ định dạng host:port:username:password phổ biến (cả có hoặc không có http://)
   if (proxyServer) {
-    const hpupMatch = proxyServer.match(/^([a-zA-Z0-9.-]+):(\d+):([^:]+):([^:]+)$/);
+    const hpupMatch = proxyServer.match(/^(?:https?:\/\/)?([a-zA-Z0-9.-]+):(\d+):([^:]+):([^:]+)$/);
     if (hpupMatch) {
       proxyServer = `http://${hpupMatch[1]}:${hpupMatch[2]}`;
-      if (!proxyUsername) proxyUsername = hpupMatch[3];
-      if (!proxyPassword) proxyPassword = hpupMatch[4];
+      if (!rawProxy?.username) proxyUsername = hpupMatch[3];
+      if (!rawProxy?.password) proxyPassword = hpupMatch[4];
     } else if (!/^([a-zA-Z0-9+.-]+):\/\//.test(proxyServer) && /^([a-zA-Z0-9.-]+):(\d+)$/.test(proxyServer)) {
       proxyServer = `http://${proxyServer}`;
     }
   }
 
+  const isApiProxyAllowed = Boolean(
+    rawConfig.flowName === 'yopmail-muse' ||
+    proxyServer?.toLowerCase() === 'api' ||
+    proxyServer?.toLowerCase() === 'auto' ||
+    (rawProxy as any)?.source === 'api'
+  );
+
   if (isProxyExplicitlyEnabled || isInitialProxy) {
-    if (!proxyServer) {
-      errors.push('Khi proxy được bật (proxy.enabled = true), "proxy.server" không được để trống.');
+    const isServerSpecified = proxyServer && proxyServer.toLowerCase() !== 'api' && proxyServer.toLowerCase() !== 'auto';
+    if (!isServerSpecified) {
+      if (!isApiProxyAllowed) {
+        errors.push('Khi proxy được bật (proxy.enabled = true), "proxy.server" không được để trống.');
+      }
       proxyConfig = {
         enabled: true,
         server: '',
@@ -479,6 +516,19 @@ export function validateConfig(
     }
   }
 
+  // 10.1. Kiểm tra outputEmailsFile (file txt lưu danh sách email đầu ra)
+  let outputEmailsFile: string = path.resolve(projectRoot, 'output', 'emails.txt');
+  if (rawConfig.outputEmailsFile !== undefined && rawConfig.outputEmailsFile !== null) {
+    if (typeof rawConfig.outputEmailsFile !== 'string' || !rawConfig.outputEmailsFile.trim()) {
+      errors.push('"outputEmailsFile" phải là một chuỗi đường dẫn file hợp lệ.');
+    } else {
+      const trimmedFile = rawConfig.outputEmailsFile.trim();
+      outputEmailsFile = path.isAbsolute(trimmedFile)
+        ? path.normalize(trimmedFile)
+        : path.resolve(projectRoot, trimmedFile);
+    }
+  }
+
   // 11. Kiểm tra maxConcurrency (số nguyên dương, mặc định 2)
   let maxConcurrency = 2;
   if (rawConfig.maxConcurrency !== undefined && rawConfig.maxConcurrency !== null) {
@@ -490,6 +540,87 @@ export function validateConfig(
       errors.push(`"maxConcurrency" phải là số nguyên dương (> 0). Nhận được: ${rawConfig.maxConcurrency}`);
     } else {
       maxConcurrency = rawConfig.maxConcurrency;
+    }
+  }
+
+  // 11.1. Kiểm tra autoCloseOnComplete (mặc định false)
+  let autoCloseOnComplete = false;
+  if (rawConfig.autoCloseOnComplete !== undefined && rawConfig.autoCloseOnComplete !== null) {
+    if (typeof rawConfig.autoCloseOnComplete !== 'boolean') {
+      errors.push('Trường "autoCloseOnComplete" nếu được cung cấp phải là kiểu boolean (true hoặc false).');
+    } else {
+      autoCloseOnComplete = rawConfig.autoCloseOnComplete;
+    }
+  }
+
+  // 11.2. Kiểm tra windowSize (tùy chọn: 'maximized' hoặc { width, height } hoặc chuỗi '1280,720' / '1280x720')
+  let parsedWindowSize: WindowSizeConfig | undefined;
+  if (rawConfig.windowSize !== undefined && rawConfig.windowSize !== null) {
+    if (typeof rawConfig.windowSize === 'string') {
+      const trimmed = rawConfig.windowSize.trim().toLowerCase();
+      if (trimmed === 'maximized') {
+        parsedWindowSize = 'maximized';
+      } else {
+        const match = trimmed.match(/^(\d+)[,xX](\d+)$/);
+        if (match) {
+          const w = parseInt(match[1], 10);
+          const h = parseInt(match[2], 10);
+          if (w >= 300 && h >= 300) {
+            parsedWindowSize = { width: w, height: h };
+          } else {
+            errors.push(`Trường "windowSize" có kích thước quá nhỏ (tối thiểu 300x300). Nhận được: ${rawConfig.windowSize}`);
+          }
+        } else {
+          errors.push(
+            `Trường "windowSize" dạng chuỗi không hợp lệ. Hỗ trợ "maximized" hoặc định dạng "width,height" / "widthxheight" (ví dụ: "1280,720"). Nhận được: ${rawConfig.windowSize}`
+          );
+        }
+      }
+    } else if (typeof rawConfig.windowSize === 'object' && rawConfig.windowSize !== null) {
+      const obj = rawConfig.windowSize as Record<string, unknown>;
+      const w = Number(obj.width);
+      const h = Number(obj.height);
+      if (!Number.isInteger(w) || !Number.isInteger(h) || w < 300 || h < 300) {
+        errors.push(
+          `Trường "windowSize" đối tượng phải chứa "width" và "height" là các số nguyên >= 300. Nhận được: width=${obj.width}, height=${obj.height}`
+        );
+      } else {
+        parsedWindowSize = { width: w, height: h };
+      }
+    } else {
+      errors.push(
+        'Trường "windowSize" nếu được cung cấp phải là chuỗi ("maximized", "1280,720") hoặc đối tượng ({ "width": 1280, "height": 720 }).'
+      );
+    }
+  }
+
+  // 11.3. Kiểm tra windowPosition (tùy chọn: { x, y } hoặc chuỗi '0,0')
+  let parsedWindowPosition: WindowPositionConfig | undefined;
+  if (rawConfig.windowPosition !== undefined && rawConfig.windowPosition !== null) {
+    if (typeof rawConfig.windowPosition === 'string') {
+      const match = rawConfig.windowPosition.trim().match(/^(\d+)[,xX](\d+)$/);
+      if (match) {
+        parsedWindowPosition = { x: parseInt(match[1], 10), y: parseInt(match[2], 10) };
+      } else {
+        errors.push(
+          `Trường "windowPosition" dạng chuỗi không hợp lệ. Phải có định dạng "x,y" (ví dụ: "0,0"). Nhận được: ${rawConfig.windowPosition}`
+        );
+      }
+    } else if (typeof rawConfig.windowPosition === 'object' && rawConfig.windowPosition !== null) {
+      const obj = rawConfig.windowPosition as Record<string, unknown>;
+      const x = Number(obj.x);
+      const y = Number(obj.y);
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0) {
+        errors.push(
+          `Trường "windowPosition" đối tượng phải chứa "x" và "y" là các số nguyên >= 0. Nhận được: x=${obj.x}, y=${obj.y}`
+        );
+      } else {
+        parsedWindowPosition = { x, y };
+      }
+    } else {
+      errors.push(
+        'Trường "windowPosition" nếu được cung cấp phải là chuỗi ("0,0") hoặc đối tượng ({ "x": 0, "y": 0 }).'
+      );
     }
   }
 
@@ -580,11 +711,17 @@ export function validateConfig(
       proxyCheckUrl,
       proxy: proxyConfig,
       phoneNumbersFile,
+      outputEmailsFile,
       phoneMode,
       incognito,
       browserMode,
       maxConcurrency,
-      jobs: parsedJobs
+      jobs: parsedJobs,
+      pageLoadMaxRetries: pageLoadMaxRetries as number,
+      pageLoadRetryDelayMs: pageLoadRetryDelayMs as number,
+      autoCloseOnComplete,
+      windowSize: parsedWindowSize,
+      windowPosition: parsedWindowPosition
     }
   };
 }
@@ -694,8 +831,14 @@ export function formatSafeConfig(config: AppConfig): Record<string, unknown> {
         },
     phoneMode: config.phoneMode,
     phoneNumbersFile: config.phoneNumbersFile,
+    outputEmailsFile: config.outputEmailsFile,
     incognito: Boolean(config.incognito),
     browserMode: config.browserMode,
+    pageLoadMaxRetries: config.pageLoadMaxRetries,
+    pageLoadRetryDelayMs: config.pageLoadRetryDelayMs,
+    autoCloseOnComplete: Boolean(config.autoCloseOnComplete),
+    windowSize: config.windowSize,
+    windowPosition: config.windowPosition,
     maxConcurrency: config.maxConcurrency,
     jobs: config.jobs?.map((j) => ({
       id: j.id,

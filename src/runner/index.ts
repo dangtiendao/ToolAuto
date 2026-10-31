@@ -140,6 +140,15 @@ export async function runFlow(
       return cancelledResult;
     }
 
+    // 1.1. Kiểm tra điều kiện thực thi bước nếu có
+    if (typeof step.shouldRun === 'function' && !step.shouldRun(context)) {
+      logger.info(
+        `[BỎ QUA BƯỚC] Đã bỏ qua bước "${step.name}" (${step.id}) theo cấu hình thực thi.`,
+        stepCtx
+      );
+      continue;
+    }
+
     logger.info(`Bắt đầu thực thi bước: "${step.name}"`, stepCtx);
 
     // Đồng bộ Page hiện tại từ BrowserManager nếu có (đảm bảo không dùng Page cũ sau restart)

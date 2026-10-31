@@ -1,8 +1,8 @@
 import { loadConfig, formatSafeConfig, getProjectRoot } from './config';
-import { BrowserManager, waitForEnter, BrowserSession } from './browser';
+import { BrowserManager, waitForEnter, BrowserSession, findWorkingProxy } from './browser';
 import { getFlowOrThrow } from './flows';
 import { runFlow, FlowContext, FlowResult, saveFlowResult } from './runner';
-import { generateRunId, Logger, sanitizeUrl } from './utils';
+import { generateRunId, Logger, sanitizeUrl, saveEmailToOutputFile } from './utils';
 import { WorkerScheduler } from './worker/scheduler';
 import { TerminalController } from './terminal/controller';
 
@@ -122,6 +122,37 @@ async function main(): Promise<void> {
     const flow = getFlowOrThrow(config.flowName);
     logger.info(`Đã chọn luồng: "${flow.name}"`);
 
+    // Đối với flow Muse: Nếu có bật chế độ proxy, trước khi thực hiện kéo mới proxy SG từ API
+    const shouldFetchSgProxy =
+      config.flowName === 'yopmail-muse' &&
+      (config.proxy.enabled || config.initialConnectionMode === 'proxy');
+
+    if (shouldFetchSgProxy) {
+      logger.info(`\n===============================================================`);
+      logger.info(`[NÂNG CAO PROXY] Chuẩn bị flow Muse: Kéo mới proxy SG từ API ProxyScrape...`);
+      try {
+        const sgResult = await findWorkingProxy('sg', {
+          logger,
+          fallbackProxy: config.proxy
+        });
+        config.proxy = sgResult.proxyConfig;
+        config.initialConnectionMode = 'proxy';
+        logger.info(
+          `✔ [PROXY MẶC ĐỊNH SG] Đã chọn proxy SG hoạt động: ${config.proxy.server} (Nguồn: ${sgResult.source}, đã test ${sgResult.testedCount} proxy).`
+        );
+      } catch (sgErr) {
+        logger.warn(
+          `[CẢNH BÁO PROXY SG] Không thể lấy proxy SG: ${(sgErr as Error).message}. Tiếp tục với cấu hình hiện tại.`
+        );
+        if (!config.proxy.server || !config.proxy.server.trim()) {
+          throw new Error(
+            `[LỖI PROXY API] Không thể lấy proxy SG từ API ProxyScrape (${(sgErr as Error).message}) và không có proxy server dự phòng. Dừng luồng an toàn.`
+          );
+        }
+      }
+      logger.info(`===============================================================\n`);
+    }
+
     browserManager = new BrowserManager(config, undefined, logger);
     const initialMode = browserManager.getConnectionMode();
     logger.info(`Chế độ kết nối ban đầu: "${initialMode}"`);
@@ -152,8 +183,39 @@ async function main(): Promise<void> {
     logger.info('Kết quả thực thi luồng:');
     logger.info(JSON.stringify(flowResult, null, 2));
 
-    if (!isCancelledByUser && !abortController.signal.aborted) {
-      await waitForEnter();
+    // 1. Trường hợp thất bại: Tự đóng trình duyệt ngay lập tức và kết thúc, không chờ Enter
+    if (flowResult.status === 'failed') {
+      logger.error(
+        `[THẤT BẠI] Luồng "${flow.name}" đã thất bại ở bước [${flowResult.failedStep?.id || 'unknown'}]: ${flowResult.error || ''}. Tự động đóng trình duyệt và kết thúc.`
+      );
+      await cleanup(false);
+      process.exit(1);
+    }
+
+    // 2. Trường hợp thành công tất cả các bước:
+    if (flowResult.status === 'success') {
+      // Chỉ khi thành công tất cả các bước mới lưu email vào file output (tránh trường hợp thất bại giữa chừng)
+      const finalEmail = (flowContext.data as any)?.emailAddress;
+      if (finalEmail) {
+        await saveEmailToOutputFile(finalEmail, {
+          filePath: config.outputEmailsFile,
+          logger
+        }).catch(() => {});
+      }
+
+      // Khi cấu hình autoCloseOnComplete = true: Tự đóng trình duyệt và kết thúc để phục vụ chạy lặp lại
+      if (config.autoCloseOnComplete) {
+        logger.info(
+          '✔ [HOÀN TẤT THÀNH CÔNG] Toàn bộ các bước đã thành công! Tự động đóng trình duyệt và kết thúc (autoCloseOnComplete = true).'
+        );
+        await cleanup(false);
+        process.exit(0);
+      }
+
+      // Mặc định: Chờ người dùng nhấn ENTER để đóng trình duyệt
+      if (!isCancelledByUser && !abortController.signal.aborted) {
+        await waitForEnter();
+      }
     }
   } catch (err) {
     const errorMsg = (err as Error).message || String(err);
@@ -178,9 +240,10 @@ async function main(): Promise<void> {
     await cleanup(false);
   }
 
-  if (isCancelledByUser || flowResult?.status === 'cancelled') {
+  const finalStatus = (flowResult as FlowResult | null)?.status;
+  if (isCancelledByUser || finalStatus === 'cancelled') {
     process.exit(130);
-  } else if (flowResult?.status === 'failed') {
+  } else if (finalStatus === 'failed') {
     process.exit(1);
   } else {
     process.exit(0);

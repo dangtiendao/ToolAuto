@@ -119,5 +119,24 @@ export function isPhoneEquivalent(actual: string, expected: string): boolean {
   if (!actual || !expected) return false;
 
   const normalize = (val: string) => val.replace(/[\s\-\(\)\.]/g, '').trim();
-  return normalize(actual) === normalize(expected);
+  const nActual = normalize(actual);
+  const nExpected = normalize(expected);
+  if (nActual === nExpected) return true;
+
+  // Hỗ trợ trường hợp một bên có +84 / 84 và một bên là 0 ở đầu (định dạng Việt Nam)
+  const toVnLocal = (v: string) => {
+    if (v.startsWith('+84')) return '0' + v.slice(3);
+    if (v.startsWith('84') && v.length >= 11) return '0' + v.slice(2);
+    return v;
+  };
+
+  const toDigitsOnly = (v: string) => {
+    const local = toVnLocal(v);
+    return local.startsWith('0') ? local.slice(1) : local;
+  };
+
+  if (toVnLocal(nActual) === toVnLocal(nExpected)) return true;
+  if (toDigitsOnly(nActual) === toDigitsOnly(nExpected)) return true;
+
+  return false;
 }

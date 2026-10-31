@@ -1,4 +1,5 @@
 import { Browser, BrowserContext, Page } from 'playwright';
+import { ProxyConfig } from '../config/types';
 
 export interface BrowserSession {
   context: BrowserContext;
@@ -22,4 +23,6 @@ export interface SwitchModeOptions {
   checkUrl?: string;
   expectedIp?: string;
   timeoutMs?: number;
+  proxyConfig?: ProxyConfig;
+  forceRestart?: boolean;
 }

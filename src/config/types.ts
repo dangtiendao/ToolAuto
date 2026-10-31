@@ -20,6 +20,15 @@ export interface RawBrowserConfig {
 
 export type BrowserMode = 'incognito' | 'persistent';
 
+export type WindowSizeConfig =
+  | 'maximized'
+  | { width: number; height: number };
+
+export interface WindowPositionConfig {
+  x: number;
+  y: number;
+}
+
 export interface RawJobConfig {
   id?: unknown;
   flowName?: unknown;
@@ -46,11 +55,17 @@ export interface RawConfig {
   proxyCheckUrl?: unknown;
   proxy?: RawProxyConfig;
   phoneNumbersFile?: unknown;
+  outputEmailsFile?: unknown;
   phoneMode?: unknown;
   incognito?: unknown;
   browserMode?: unknown;
   maxConcurrency?: unknown;
   jobs?: unknown;
+  pageLoadMaxRetries?: unknown;
+  pageLoadRetryDelayMs?: unknown;
+  autoCloseOnComplete?: unknown;
+  windowSize?: unknown;
+  windowPosition?: unknown;
 }
 
 export interface ProxyConfig {
@@ -94,11 +109,17 @@ export interface AppConfig {
   proxyCheckUrl?: string;
   proxy: ProxyConfig;
   phoneNumbersFile?: string;
+  outputEmailsFile?: string;
   phoneMode: 'mock' | 'live';
   incognito?: boolean;
   browserMode?: BrowserMode;
   maxConcurrency: number;
   jobs?: JobConfig[];
+  pageLoadMaxRetries: number;
+  pageLoadRetryDelayMs: number;
+  autoCloseOnComplete?: boolean;
+  windowSize?: WindowSizeConfig;
+  windowPosition?: WindowPositionConfig;
 }
 
 export interface ValidationResult {

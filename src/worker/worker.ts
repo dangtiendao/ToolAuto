@@ -1,5 +1,5 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
-import { getChromeExecutablePath, handleLaunchError } from '../browser/common';
+import { getChromeExecutablePath, handleLaunchError, buildWindowArgs } from '../browser/common';
 import { buildPlaywrightProxy } from '../browser/proxy';
 import { ConnectionMode } from '../browser/types';
 import { AppConfig, ProxyConfig } from '../config/types';
@@ -179,7 +179,10 @@ export class WorkerInstance {
    */
   private async initBrowser(): Promise<void> {
     const chromeExe = getChromeExecutablePath() || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    const launchArgs = ['--incognito'];
+    const launchArgs = [
+      '--incognito',
+      ...buildWindowArgs(this.config.windowSize, this.config.windowPosition)
+    ];
 
     if (this.connectionMode === 'direct') {
       launchArgs.push('--no-proxy-server');

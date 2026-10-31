@@ -28,6 +28,7 @@ export interface Step {
   name: string;
   execute: (context: FlowContext) => Promise<void>;
   verify?: (context: FlowContext) => Promise<boolean>;
+  shouldRun?: (context: FlowContext) => boolean;
 }
 
 export interface Flow {

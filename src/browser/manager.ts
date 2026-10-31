@@ -1,14 +1,16 @@
 import { chromium, Page } from 'playwright';
-import { AppConfig } from '../config/types';
+import { AppConfig, ProxyConfig } from '../config/types';
 import { BrowserSession, ConnectionMode, SwitchModeOptions } from './types';
 import { buildPlaywrightProxy } from './proxy';
 import {
   closeBrowser,
   getChromeExecutablePath,
-  handleLaunchError
+  handleLaunchError,
+  buildWindowArgs
 } from './common';
 import { Logger } from '../utils/logger';
 import { sanitizeUrl } from '../utils/sanitize';
+import { safeRequestGet } from './navigation';
 
 /**
  * Trình quản lý trình duyệt và chế độ kết nối (Direct / Proxy).
@@ -18,6 +20,7 @@ import { sanitizeUrl } from '../utils/sanitize';
 export class BrowserManager {
   private config: AppConfig;
   private currentMode: ConnectionMode;
+  private currentProxyConfig?: ProxyConfig;
   private session: BrowserSession | null = null;
   private isSwitching: boolean = false;
   private logger?: Logger;
@@ -26,6 +29,7 @@ export class BrowserManager {
   constructor(config: AppConfig, initialSession?: BrowserSession, logger?: Logger) {
     this.config = config;
     this.currentMode = config.initialConnectionMode || (config.proxy.enabled ? 'proxy' : 'direct');
+    this.currentProxyConfig = this.currentMode === 'proxy' ? config.proxy : undefined;
     this.session = initialSession || null;
     this.logger = logger;
     if (initialSession && initialSession.page) {
@@ -38,6 +42,13 @@ export class BrowserManager {
    */
   public getConnectionMode(): ConnectionMode {
     return this.currentMode;
+  }
+
+  /**
+   * Lấy cấu hình proxy hiện tại đang hoạt động (nếu có).
+   */
+  public getProxyConfig(): ProxyConfig | undefined {
+    return this.currentProxyConfig;
   }
 
   /**
@@ -120,8 +131,55 @@ export class BrowserManager {
     }
 
     const mode = this.currentMode;
-    this.session = await this.launchSession(mode);
+    const initialProxy = mode === 'proxy' ? this.config.proxy : undefined;
+    this.session = await this.launchSession(mode, initialProxy);
+    this.currentProxyConfig = initialProxy;
     this.activePages.set('default', this.session.page);
+
+    // Xác minh kết nối proxy ban đầu nếu đang ở chế độ proxy
+    if (mode === 'proxy' && initialProxy?.server) {
+      const checkUrl = this.config.proxyCheckUrl || 'https://httpbin.org/ip';
+      let outboundIp = '';
+      try {
+        const timeoutMs = Math.min(this.config.navigationTimeoutMs, 15000);
+        const res = await safeRequestGet(this.session.context.request, checkUrl, {
+          timeout: timeoutMs,
+          maxRetries: this.config.pageLoadMaxRetries,
+          retryDelayMs: this.config.pageLoadRetryDelayMs,
+          logger: this.logger
+        });
+        if (res.ok()) {
+          const body = await res.json().catch(() => null);
+          if (body && typeof body.origin === 'string') {
+            outboundIp = body.origin;
+          }
+        }
+      } catch (checkErr) {
+        // Nếu proxy chết, dừng ngay theo quy tắc an toàn, tuyệt đối không tự fallback sang direct
+        await this.close();
+        throw new Error(
+          `[LỖI KẾT NỐI PROXY BAN ĐẦU] Không thể kết nối qua proxy mặc định (Loại 1: ${sanitizeUrl(initialProxy.server)}).\n` +
+          `  -> URL kiểm tra: ${sanitizeUrl(checkUrl)}\n` +
+          `  -> Chi tiết lỗi: ${(checkErr as Error).message}\n` +
+          `Quy tắc an toàn: Dừng luồng ngay lập tức, tuyệt đối KHÔNG tự động fallback sang kết nối trực tiếp (IP máy).`
+        );
+      }
+
+      const ipLogNotice = outboundIp ? ` [IP đầu ra thực tế: ${outboundIp}]` : '';
+      this.logger?.info(
+        `[XÁC MINH PROXY BAN ĐẦU] Chrome đã kết nối qua Proxy Loại 1 (${sanitizeUrl(initialProxy.server)})${ipLogNotice}.`,
+        { flow: this.config.flowName }
+      );
+      console.log(`\n===============================================================`);
+      console.log(`[XÁC MINH PROXY BAN ĐẦU - PROXY MẶC ĐỊNH (LOẠI 1)]`);
+      console.log(`-> Proxy server: ${sanitizeUrl(initialProxy.server)}`);
+      if (outboundIp) {
+        console.log(`-> IP đầu ra thực tế của Chrome: ${outboundIp}`);
+      }
+      console.log(`-> Trạng thái: ĐÃ KẾT NỐI QUA PROXY THÀNH CÔNG (Không dùng IP máy)`);
+      console.log(`===============================================================\n`);
+    }
+
     return this.session;
   }
 
@@ -129,7 +187,7 @@ export class BrowserManager {
    * Chuyển đổi chế độ kết nối ("direct" | "proxy").
    * Quy trình tuần tự, an toàn:
    * 1. Kiểm tra an toàn trạng thái.
-   * 2. Nếu cùng chế độ: không restart, ghi log "Chế độ kết nối không thay đổi".
+   * 2. Nếu cùng chế độ và cùng cấu hình proxy: không restart, ghi log "Chế độ kết nối không thay đổi".
    * 3. Kiểm tra cấu hình chế độ đích TRƯỚC khi đóng Chrome.
    * 4. Đóng context hiện tại và chờ giải phóng SingletonLock.
    * 5. Vô hiệu hóa mọi tham chiếu Page/Context cũ.
@@ -148,8 +206,20 @@ export class BrowserManager {
       );
     }
 
-    // 2. Nếu chế độ yêu cầu đã đang hoạt động: Không restart Chrome (no-op)
-    if (targetMode === this.currentMode) {
+    // Xác định cấu hình proxy đích (nếu chuyển sang proxy)
+    const targetProxy =
+      options?.proxyConfig ||
+      (targetMode === 'proxy' ? this.config.proxy : undefined);
+
+    const isSameMode = targetMode === this.currentMode;
+    const isSameProxy = targetMode === 'proxy'
+      ? (this.currentProxyConfig?.server === targetProxy?.server &&
+         this.currentProxyConfig?.username === targetProxy?.username &&
+         this.currentProxyConfig?.password === targetProxy?.password)
+      : true;
+
+    // 2. Nếu chế độ yêu cầu và cấu hình proxy đã đang hoạt động: Không restart Chrome (no-op)
+    if (isSameMode && isSameProxy && !options?.forceRestart) {
       const msg = `Chế độ kết nối không thay đổi (hiện tại: "${this.currentMode}"). Bỏ qua thao tác khởi động lại Chrome.`;
       this.logger?.info(msg, { flow: this.config.flowName });
       return this.session!;
@@ -157,7 +227,7 @@ export class BrowserManager {
 
     // 2.1. Kiểm tra cấu hình chế độ đích TRƯỚC khi thực hiện
     if (targetMode === 'proxy') {
-      const server = this.config.proxy?.server?.trim();
+      const server = targetProxy?.server?.trim();
       if (!server) {
         throw new Error(
           '[LỖI CẤU HÌNH PROXY] Không thể chuyển sang chế độ proxy vì "proxy.server" chưa được cấu hình.\n' +
@@ -167,7 +237,7 @@ export class BrowserManager {
 
       // Kiểm tra tính hợp lệ của giao thức proxy
       try {
-        buildPlaywrightProxy(this.config.proxy);
+        buildPlaywrightProxy(targetProxy!);
       } catch (validationErr) {
         throw new Error(
           `[LỖI CẤU HÌNH PROXY] Cấu hình proxy không hợp lệ: ${(validationErr as Error).message}\n` +
@@ -183,33 +253,47 @@ export class BrowserManager {
       if (this.session?.browser && this.session.browser.isConnected()) {
         this.isSwitching = true;
         this.logger?.info(
-          `[CHUYỂN PROXY ẨN DANH] Giữ nguyên cửa sổ Chrome, tạo context mới với kết nối "${targetMode}" và đồng bộ cookie phiên làm việc...`,
+          `[CHUYỂN PROXY ẨN DANH] Giữ nguyên cửa sổ Chrome, tạo context mới với kết nối "${targetMode}" (${targetProxy?.server || 'direct'}) và đồng bộ cookie phiên làm việc...`,
           { flow: this.config.flowName }
         );
 
         const oldContext = this.session.context;
-        let oldCookies: any[] = [];
+        let storageState: any = undefined;
         try {
-          oldCookies = await oldContext.cookies();
+          storageState = await oldContext.storageState();
         } catch {
-          // bỏ qua nếu không đọc được cookie
+          // bỏ qua nếu không trích xuất được storageState
+        }
+
+        let oldCookies: any[] = [];
+        if (!storageState) {
+          try {
+            oldCookies = await oldContext.cookies();
+          } catch {
+            // bỏ qua nếu không đọc được cookie
+          }
         }
 
         const proxyOption =
-          targetMode === 'proxy' && this.config.proxy?.server
-            ? buildPlaywrightProxy(this.config.proxy)
+          targetMode === 'proxy' && targetProxy?.server
+            ? buildPlaywrightProxy(targetProxy)
             : undefined;
 
         let newContext;
         try {
-          newContext = await this.session.browser.newContext({
+          const contextOptions: any = {
             viewport: null,
             proxy: proxyOption
-          });
+          };
+          if (storageState) {
+            contextOptions.storageState = storageState;
+          }
+
+          newContext = await this.session.browser.newContext(contextOptions);
           newContext.setDefaultTimeout(this.config.actionTimeoutMs);
           newContext.setDefaultNavigationTimeout(this.config.navigationTimeoutMs);
 
-          if (oldCookies && oldCookies.length > 0) {
+          if (!storageState && oldCookies && oldCookies.length > 0) {
             await newContext.addCookies(oldCookies).catch(() => {});
           }
         } catch (err) {
@@ -232,6 +316,7 @@ export class BrowserManager {
 
         this.activePages.clear();
         this.activePages.set('default', newPage);
+        this.activePages.set('TabB', newPage);
 
         const newSession: BrowserSession = {
           browser: this.session.browser,
@@ -249,16 +334,29 @@ export class BrowserManager {
           { flow: this.config.flowName }
         );
 
+        let outboundIp = '';
         try {
           const timeoutMs = options?.timeoutMs || this.config.navigationTimeoutMs;
-          const response = await newSession.context.request.get(checkUrl, {
-            timeout: timeoutMs
+          const response = await safeRequestGet(newSession.context.request, checkUrl, {
+            timeout: timeoutMs,
+            maxRetries: this.config.pageLoadMaxRetries,
+            retryDelayMs: this.config.pageLoadRetryDelayMs,
+            logger: this.logger
           });
 
           if (!response.ok()) {
             throw new Error(
               `URL kiểm tra phản hồi với mã trạng thái HTTP ${response.status()} ${response.statusText()}`
             );
+          }
+
+          try {
+            const body = await response.json();
+            if (body && typeof body.origin === 'string') {
+              outboundIp = body.origin;
+            }
+          } catch {
+            // bỏ qua nếu response không phải JSON
           }
         } catch (checkErr) {
           // Đóng context mới nếu kết nối thất bại
@@ -273,11 +371,13 @@ export class BrowserManager {
         }
 
         this.currentMode = targetMode;
+        this.currentProxyConfig = targetMode === 'proxy' ? targetProxy : undefined;
         this.session = newSession;
         this.isSwitching = false;
 
+        const ipNotice = outboundIp ? ` [IP đầu ra: ${outboundIp}]` : '';
         this.logger?.info(
-          `[CHUYỂN CHẾ ĐỘ THÀNH CÔNG] Đã chuyển sang chế độ "${targetMode}" trong phiên ẩn danh (giữ nguyên cửa sổ Chrome và cookie).`,
+          `[CHUYỂN CHẾ ĐỘ THÀNH CÔNG] Đã chuyển sang chế độ "${targetMode}" (${targetProxy?.server || 'direct'})${ipNotice} trong phiên ẩn danh (giữ nguyên cửa sổ Chrome, cookies và localStorage).`,
           { flow: this.config.flowName }
         );
 
@@ -292,7 +392,7 @@ export class BrowserManager {
 
     // 3. Kiểm tra cấu hình chế độ đích TRƯỚC khi đóng Chrome (cho Persistent Context)
     if (targetMode === 'proxy') {
-      const server = this.config.proxy?.server?.trim();
+      const server = targetProxy?.server?.trim();
       if (!server) {
         throw new Error(
           '[LỖI CẤU HÌNH PROXY] Không thể chuyển sang chế độ proxy vì "proxy.server" chưa được cấu hình.\n' +
@@ -302,7 +402,7 @@ export class BrowserManager {
 
       // Kiểm tra tính hợp lệ của giao thức proxy
       try {
-        buildPlaywrightProxy(this.config.proxy);
+        buildPlaywrightProxy(targetProxy!);
       } catch (validationErr) {
         throw new Error(
           `[LỖI CẤU HÌNH PROXY] Cấu hình proxy không hợp lệ: ${(validationErr as Error).message}\n` +
@@ -315,7 +415,7 @@ export class BrowserManager {
     this.isSwitching = true;
 
     this.logger?.info(
-      `[CHUYỂN CHẾ ĐỘ KẾT NỐI] Bắt đầu chuyển từ chế độ "${oldMode}" sang "${targetMode}"...`,
+      `[CHUYỂN CHẾ ĐỘ KẾT NỐI] Bắt đầu chuyển từ chế độ "${oldMode}" sang "${targetMode}" (${targetProxy?.server || 'direct'})...`,
       { flow: this.config.flowName }
     );
 
@@ -353,7 +453,7 @@ export class BrowserManager {
 
     let newSession: BrowserSession;
     try {
-      newSession = await this.launchSession(targetMode);
+      newSession = await this.launchSession(targetMode, targetProxy);
     } catch (launchErr) {
       this.isSwitching = false;
       // Dừng luồng, KHÔNG tự fallback sang direct, KHÔNG đánh dấu chế độ đích đã sẵn sàng
@@ -374,8 +474,11 @@ export class BrowserManager {
     try {
       const timeoutMs = options?.timeoutMs || this.config.navigationTimeoutMs;
       // Sử dụng APIRequestContext của chính context Chrome mới để request đi qua proxy/network stack của Chrome
-      const response = await newSession.context.request.get(checkUrl, {
-        timeout: timeoutMs
+      const response = await safeRequestGet(newSession.context.request, checkUrl, {
+        timeout: timeoutMs,
+        maxRetries: this.config.pageLoadMaxRetries,
+        retryDelayMs: this.config.pageLoadRetryDelayMs,
+        logger: this.logger
       });
 
       if (!response.ok()) {
@@ -449,6 +552,7 @@ export class BrowserManager {
 
     // 8. Đánh dấu chuyển thành công
     this.currentMode = targetMode;
+    this.currentProxyConfig = targetMode === 'proxy' ? targetProxy : undefined;
     this.session = newSession;
     this.activePages.set('default', newSession.page);
     this.isSwitching = false;
@@ -489,26 +593,31 @@ export class BrowserManager {
   /**
    * Khởi chạy phiên trình duyệt dựa trên cấu hình: Ẩn danh (Incognito) hoặc Persistent Context.
    */
-  private async launchSession(mode: ConnectionMode): Promise<BrowserSession> {
+  private async launchSession(mode: ConnectionMode, targetProxy?: ProxyConfig): Promise<BrowserSession> {
     if (this.config.incognito) {
-      return this.launchIncognitoSession(mode);
+      return this.launchIncognitoSession(mode, targetProxy);
     }
-    return this.launchPersistentSession(mode);
+    return this.launchPersistentSession(mode, targetProxy);
   }
 
   /**
    * Khởi chạy phiên Chrome ẩn danh (Incognito).
    * Không ghi dữ liệu/cookie lên ổ đĩa, độc lập hoàn toàn, tránh xung đột SingletonLock.
    */
-  private async launchIncognitoSession(mode: ConnectionMode): Promise<BrowserSession> {
+  private async launchIncognitoSession(mode: ConnectionMode, targetProxy?: ProxyConfig): Promise<BrowserSession> {
     const chromeExe = getChromeExecutablePath() || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    const launchArgs = ['--incognito'];
+    const launchArgs = [
+      '--incognito',
+      '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+      ...buildWindowArgs(this.config.windowSize, this.config.windowPosition)
+    ];
 
     if (mode === 'direct') {
       launchArgs.push('--no-proxy-server');
     }
 
-    const proxyOption = mode === 'proxy' && this.config.proxy?.server ? buildPlaywrightProxy(this.config.proxy) : undefined;
+    const activeProxy = targetProxy || (mode === 'proxy' ? this.config.proxy : undefined);
+    const proxyOption = mode === 'proxy' && activeProxy?.server ? buildPlaywrightProxy(activeProxy) : undefined;
 
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
       channel: 'chrome',
@@ -556,12 +665,16 @@ export class BrowserManager {
   /**
    * Khởi chạy persistent context của Chrome với cấu hình rõ ràng cho từng chế độ.
    */
-  private async launchPersistentSession(mode: ConnectionMode): Promise<BrowserSession> {
+  private async launchPersistentSession(mode: ConnectionMode, targetProxy?: ProxyConfig): Promise<BrowserSession> {
     const chromeExe = getChromeExecutablePath() || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     const profileDirName = this.config.selectedProfile.profileDirectory;
     const userDataDir = this.config.selectedProfile.userDataDir;
 
-    const launchArgs = [`--profile-directory=${profileDirName}`];
+    const launchArgs = [
+      `--profile-directory=${profileDirName}`,
+      '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+      ...buildWindowArgs(this.config.windowSize, this.config.windowPosition)
+    ];
 
     const launchOptions: Parameters<typeof chromium.launchPersistentContext>[1] = {
       channel: 'chrome',
@@ -571,8 +684,9 @@ export class BrowserManager {
       args: launchArgs
     };
 
-    if (mode === 'proxy') {
-      launchOptions.proxy = buildPlaywrightProxy(this.config.proxy);
+    const activeProxy = targetProxy || (mode === 'proxy' ? this.config.proxy : undefined);
+    if (mode === 'proxy' && activeProxy?.server) {
+      launchOptions.proxy = buildPlaywrightProxy(activeProxy);
     } else {
       // Chế độ direct: cấu hình kết nối trực tiếp rõ ràng, không bị proxy hệ thống chi phối
       launchArgs.push('--no-proxy-server');
@@ -613,6 +727,10 @@ export class BrowserManager {
  */
 export function getConnectionMode(manager: BrowserManager): ConnectionMode {
   return manager.getConnectionMode();
+}
+
+export function getProxyConfig(manager: BrowserManager): ProxyConfig | undefined {
+  return manager.getProxyConfig();
 }
 
 export function switchConnectionMode(

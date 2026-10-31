@@ -1,5 +1,6 @@
 import { Flow } from '../runner/types';
 import { sanitizeUrl } from '../utils/sanitize';
+import { safeGoto } from '../browser';
 
 /**
  * Luồng demo bật/tắt proxy riêng biệt (proxy-switch-demo).
@@ -67,9 +68,15 @@ export const proxySwitchDemoFlow: Flow = {
           { flow: 'proxy-switch-demo', step: 'stage-a-open-check-url' }
         );
 
-        await context.page.goto(checkUrl, {
+        await safeGoto(context.page, checkUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: context.config.navigationTimeoutMs
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'proxy-switch-demo',
+          stepName: 'stage-a-open-check-url'
         });
 
         const title = await context.page.title();
@@ -162,9 +169,15 @@ export const proxySwitchDemoFlow: Flow = {
           { flow: 'proxy-switch-demo', step: 'stage-b-open-check-url' }
         );
 
-        await pageB.goto(checkUrl, {
+        await safeGoto(pageB, checkUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: context.config.navigationTimeoutMs
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'proxy-switch-demo',
+          stepName: 'stage-b-open-check-url'
         });
 
         const title = await pageB.title();
@@ -257,9 +270,15 @@ export const proxySwitchDemoFlow: Flow = {
           { flow: 'proxy-switch-demo', step: 'verify-direct-restored' }
         );
 
-        await pageC.goto(checkUrl, {
+        await safeGoto(pageC, checkUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: context.config.navigationTimeoutMs
+          timeout: context.config.navigationTimeoutMs,
+          maxRetries: context.config.pageLoadMaxRetries,
+          retryDelayMs: context.config.pageLoadRetryDelayMs,
+          logger: context.logger,
+          cancellationToken: context.cancellationToken,
+          flowName: 'proxy-switch-demo',
+          stepName: 'verify-direct-restored'
         });
 
         const title = await pageC.title();

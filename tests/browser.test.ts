@@ -50,11 +50,22 @@ async function runTests(): Promise<void> {
     console.log('  ✔ Proxy SOCKS5 hợp lệ chuyển đổi chính xác.');
   }
 
-  // 1.3: Giao thức không được Playwright hỗ trợ (ví dụ socks4://)
+  // 1.3: Proxy SOCKS4 hợp lệ chuyển đổi chính xác
+  {
+    const socks4Cfg = {
+      enabled: true,
+      server: 'socks4://127.0.0.1:1080'
+    };
+    const pwProxy = buildPlaywrightProxy(socks4Cfg);
+    assert.strictEqual(pwProxy.server, 'socks4://127.0.0.1:1080');
+    console.log('  ✔ Proxy SOCKS4 hợp lệ chuyển đổi chính xác.');
+  }
+
+  // 1.4: Giao thức không được hỗ trợ (ví dụ ftp://)
   {
     const unsupportedCfg = {
       enabled: true,
-      server: 'socks4://127.0.0.1:1080'
+      server: 'ftp://127.0.0.1:21'
     };
 
     let threw = false;
@@ -63,11 +74,11 @@ async function runTests(): Promise<void> {
     } catch (err: unknown) {
       threw = true;
       const msg = (err as Error).message;
-      assert.ok(msg.includes('socks4'), 'Thông báo phải chỉ rõ giao thức socks4 không được hỗ trợ');
-      assert.ok(msg.includes('http://, https://, socks5://'), 'Thông báo phải nêu các giao thức được hỗ trợ');
+      assert.ok(msg.includes('ftp'), 'Thông báo phải chỉ rõ giao thức ftp không được hỗ trợ');
+      assert.ok(msg.includes('http://, https://, socks5://, socks4://'), 'Thông báo phải nêu các giao thức được hỗ trợ');
     }
     assert.strictEqual(threw, true, 'Phải ném lỗi khi giao thức không được hỗ trợ');
-    console.log('  ✔ Từ chối giao thức proxy không được hỗ trợ (socks4) thành công.');
+    console.log('  ✔ Từ chối giao thức proxy không được hỗ trợ (ftp) thành công.');
   }
 
   // ==========================================

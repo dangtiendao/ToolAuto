@@ -1,21 +1,26 @@
 import { ProxyConfig } from '../config/types';
 import { PlaywrightProxyOptions } from './types';
 
-const SUPPORTED_PROTOCOLS = ['http', 'https', 'socks5'];
+const SUPPORTED_PROTOCOLS = ['http', 'https', 'socks5', 'socks4'];
 
 /**
- * Xây dựng và kiểm tra đối tượng cấu hình proxy cho Playwright.
- * Chỉ hỗ trợ các giao thức mà Playwright hỗ trợ chính thức: http, https, socks5.
+ * Xây dựng và kiểm tra đối tượng cấu hình proxy cho Playwright / Chromium.
+ * Hỗ trợ các giao thức proxy phổ biến: http, https, socks5, socks4.
  */
 export function buildPlaywrightProxy(proxyConfig: ProxyConfig): PlaywrightProxyOptions {
-  const server = proxyConfig.server?.trim() || '';
+  let server = proxyConfig.server?.trim() || '';
   if (!server) {
     throw new Error(
       '[LỖI PROXY] Cấu hình proxy đang được bật (proxy.enabled = true) nhưng "proxy.server" bị trống.'
     );
   }
 
-  // Kiểm tra scheme giao thức nếu có
+  // Nếu server chưa có scheme giao thức (ví dụ: host:port), tự động chuẩn hóa sang http://
+  if (!/^([a-zA-Z0-9+.-]+):\/\//.test(server)) {
+    server = `http://${server}`;
+  }
+
+  // Kiểm tra scheme giao thức
   const schemeMatch = server.match(/^([a-zA-Z0-9+.-]+):\/\//);
   if (schemeMatch) {
     const protocol = schemeMatch[1].toLowerCase();

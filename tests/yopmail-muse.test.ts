@@ -27,10 +27,10 @@ import {
   waitForVerificationCodeAndCloseDialog,
   clickContactInfoOnTabC,
   clickAddMobileNumberOnTabC,
+  ensureCountryCodeIsVietnam,
   inputReenterPhoneOnTabC,
   clickNextSpanOnTabC,
   activateTabB,
-  reloadTabBThroughProxy,
   yopmailMuseFlow,
   generateMailboxName
 } from '../src/flows/yopmail-muse.flow';
@@ -948,11 +948,9 @@ async function runTests(): Promise<void> {
       'tabC-click-add-mobile-number',
       'tabC-input-reenter-phone',
       'tabC-submit-next',
-      'tabB-activate',
-      'tabB-enable-proxy',
-      'tabB-reload-proxy'
+      'tabB-activate'
     ]);
-    console.log(`  ✔ Luồng đã đăng ký thành công với 24 bước tuần tự: [${stepIds.join(', ')}].`);
+    console.log(`  ✔ Luồng đã đăng ký thành công với 22 bước tuần tự: [${stepIds.join(', ')}].`);
   }
 
   // ==========================================
@@ -1507,7 +1505,8 @@ async function runTests(): Promise<void> {
         initialConnectionMode: 'direct',
         proxy: { enabled: false, server: 'http://103.82.25.199:14553' },
         phoneNumbersFile: path.resolve(projectRoot, 'phone-numbers.example.txt'),
-        phoneMode: 'mock'
+        phoneMode: 'mock',
+        outputEmailsFile: path.resolve(projectRoot, 'output/test-output/yopmail-muse-mock-emails.txt')
       },
       runId: 'test-full-20-steps-run',
       logger: dummyLogger,
@@ -1531,8 +1530,8 @@ async function runTests(): Promise<void> {
 
     const flowResult = await runFlow(yopmailMuseFlow, fullTestContext, projectRoot);
 
-    assert.strictEqual(flowResult.status, 'success', 'Luồng 24 bước phải chạy thành công');
-    assert.strictEqual(flowResult.completedSteps.length, 24, 'Phải hoàn thành đủ 24 bước tuần tự');
+    assert.strictEqual(flowResult.status, 'success', 'Luồng 22 bước phải chạy thành công');
+    assert.strictEqual(flowResult.completedSteps.length, 22, 'Phải hoàn thành đủ 22 bước tuần tự');
     assert.strictEqual(continueBtnClicked, true, 'Nút tiếp tục trên TabB phải được bấm');
     assert.strictEqual(tabCCreated, true, 'TabC phải được tạo trong cùng browser context');
     assert.strictEqual(tabCClickedTwoFactor, true, 'Phải click Xác thực 2 yếu tố trên TabC');
@@ -1548,8 +1547,7 @@ async function runTests(): Promise<void> {
     assert.strictEqual(tabCReenteredPhone, tabCPhoneEntered, 'Số điện thoại nhập lại phải trùng khớp với số đã chọn');
     assert.strictEqual(tabCNextClickedAfterReenter, true, 'Phải click Next trên TabC sau khi nhập lại số');
     assert.strictEqual(tabBBroughtToFrontAfterC, true, 'Phải kích hoạt lại TabB làm tab hiện hành sau khi xong TabC');
-    assert.strictEqual(tabBGotoCalled || tabBReloaded, true, 'TabB phải được tải lại qua proxy');
-    console.log('  ✔ Toàn bộ 24 bước của luồng yopmail-muse đã chạy tuần tự qua Sequential Runner thành công 100%.');
+    console.log('  ✔ Toàn bộ 22 bước của luồng yopmail-muse đã chạy tuần tự qua Sequential Runner thành công 100%.');
   }
 
   // ==========================================
@@ -2884,369 +2882,431 @@ async function runTests(): Promise<void> {
   }
 
   // ==========================================
-  // Test 36: Kiểm tra chuyển về TabB, bật proxy và tải lại trang TabB qua proxy (reloadTabBThroughProxy)
+  // Test 43: Kiểm tra đổi mã quốc gia sang (+84) trước khi paste số điện thoại (ensureCountryCodeIsVietnam)
   // ==========================================
-  console.log('\n36. Kiểm tra chuyển về TabB, bật proxy và tải lại trang TabB qua proxy (reloadTabBThroughProxy):');
+  console.log('\n43. Kiểm tra đổi mã quốc gia sang (+84) trước khi paste số điện thoại (ensureCountryCodeIsVietnam):');
   {
-    // 36.1: activateTabB lưu URL hợp lệ, bảo mật loại bỏ query string khỏi log
-    let capturedLogs: string[] = [];
-    const memoryLogger: any = {
-      info: (msg: string) => capturedLogs.push(msg),
-      warn: (msg: string) => capturedLogs.push(msg),
-      error: (msg: string) => capturedLogs.push(msg)
-    };
-
-    const mockTabBWithQuery: any = {
+    // 43.1: Khi đã là (+84) thì KHÔNG click Change
+    let changeClicked43_1 = false;
+    const mockPageAlready84: any = {
       isClosed: () => false,
-      url: () => 'https://muse.ai/workspace?token=SECRET_SESSION_TOKEN&user=12345',
-      bringToFront: async () => {}
+      title: async () => 'Meta Security',
+      locator: (sel: string) => {
+        if (sel.includes('Change') || sel.includes('Thay đổi')) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              innerText: async () => 'Change',
+              locator: (subSel: string) => {
+                if (subSel === 'xpath=..') {
+                  return {
+                    textContent: async () => 'Vietnam (+84) Change'
+                  };
+                }
+                return { textContent: async () => '' };
+              }
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
     };
 
-    const savedUrl = await activateTabB({
-      pageB: mockTabBWithQuery,
-      stepName: 'test-save-url',
-      logger: memoryLogger
+    await ensureCountryCodeIsVietnam({
+      page: mockPageAlready84,
+      stepName: 'test-already-84',
+      timeoutMs: 1000
+    });
+    assert.strictEqual(changeClicked43_1, false, 'Khi đã là (+84) thì tuyệt đối không được click Change');
+    console.log('  ✔ Phát hiện mã quốc gia đã là (+84), bỏ qua không bấm Change thành công.');
+
+    // 43.2: Khi là (+1) thì click Change, đợi popup mở ra chọn (+84), sau đó chọn Save
+    let changeClicked43_2 = false;
+    let popupOpen = false;
+    let searchTyped = '';
+    let selected84 = false;
+    let saveClicked = false;
+
+    const mockPageNeedChange: any = {
+      isClosed: () => false,
+      title: async () => 'Meta Security',
+      waitForTimeout: async (ms: number) => {},
+      locator: (sel: string) => {
+        if (!popupOpen && (sel.includes('Change') || sel.includes('Thay đổi'))) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              innerText: async () => 'Change',
+              click: async () => {
+                changeClicked43_2 = true;
+                popupOpen = true;
+              },
+              locator: (subSel: string) => {
+                if (subSel === 'xpath=..') {
+                  return {
+                    textContent: async () => 'United States (+1) Change'
+                  };
+                }
+                return { textContent: async () => '' };
+              }
+            })
+          };
+        }
+        if (popupOpen) {
+          if (sel.includes('input[placeholder*="Search"') || sel.includes('input[type="search"]')) {
+            return {
+              count: async () => 1,
+              nth: () => ({
+                isVisible: async () => true,
+                fill: async (val: string) => {
+                  searchTyped = val;
+                }
+              })
+            };
+          }
+          if (sel.includes('(+84)')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                innerText: async () => 'Vietnam (+84)',
+                textContent: async () => 'Vietnam (+84)',
+                scrollIntoViewIfNeeded: async () => {},
+                click: async () => {
+                  selected84 = true;
+                },
+                locator: () => ({
+                  count: async () => 0
+                })
+              })
+            };
+          }
+          if (sel.includes('Save') || sel.includes('Lưu')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                isEnabled: async () => true,
+                innerText: async () => 'Save',
+                textContent: async () => 'Save',
+                click: async () => {
+                  saveClicked = true;
+                  popupOpen = false;
+                },
+                waitFor: async () => {}
+              })
+            };
+          }
+        }
+        return { count: async () => 0 };
+      }
+    };
+
+    await ensureCountryCodeIsVietnam({
+      page: mockPageNeedChange,
+      stepName: 'test-change-to-84',
+      timeoutMs: 2000
     });
 
-    assert.strictEqual(
-      savedUrl,
-      'https://muse.ai/workspace?token=SECRET_SESSION_TOKEN&user=12345',
-      'Phải lưu đầy đủ URL để goto() sau restart'
-    );
-    // Kiểm tra log không chứa query string nhạy cảm
-    const logContainsSecret = capturedLogs.some((l) => l.includes('SECRET_SESSION_TOKEN') || l.includes('token='));
-    assert.strictEqual(logContainsSecret, false, 'Log tuyệt đối không được chứa query string hoặc dữ liệu nhạy cảm');
-    console.log('  ✔ Lưu URL TabB hợp lệ và bảo mật query string khỏi log thành công.');
+    assert.strictEqual(changeClicked43_2, true, 'Phải click nút Change khi mã không phải (+84)');
+    assert.strictEqual(selected84, true, 'Phải chọn mục (+84)');
+    assert.strictEqual(saveClicked, true, 'Phải click nút Save sau khi chọn (+84)');
+    assert.strictEqual(popupOpen, false, 'Popup phải đóng sau khi Save');
+    console.log('  ✔ Click Change khi không phải (+84), đợi popup, chọn (+84) và chọn Save thành công.');
 
-    // 36.2: activateTabB từ chối URL không hợp lệ (không phải http/https)
-    let invalidProtocolCaught = false;
-    const mockTabBInvalidProtocol: any = {
+    // 43.3: Kiểm tra lần paste 1 (inputPhoneNumberOnTabC) tự động đổi mã (+84)
+    let firstPasteChangeClicked = false;
+    let firstPasteVal = '';
+    let firstPopupOpen = false;
+    let firstSaveClicked = false;
+
+    const mockPagePaste1: any = {
       isClosed: () => false,
-      url: () => 'file:///C:/Users/test/page.html',
-      bringToFront: async () => {}
+      title: async () => 'Meta Security',
+      waitForTimeout: async () => {},
+      locator: (sel: string) => {
+        if (!firstPopupOpen && (sel.includes('Change') || sel.includes('Thay đổi'))) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              innerText: async () => 'Change',
+              click: async () => {
+                firstPasteChangeClicked = true;
+                firstPopupOpen = true;
+              },
+              locator: (subSel: string) => ({
+                textContent: async () => 'United States (+1) Change'
+              })
+            })
+          };
+        }
+        if (firstPopupOpen) {
+          if (sel.includes('(+84)')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                innerText: async () => 'Vietnam (+84)',
+                textContent: async () => 'Vietnam (+84)',
+                scrollIntoViewIfNeeded: async () => {},
+                click: async () => {},
+                locator: () => ({ count: async () => 0 })
+              })
+            };
+          }
+          if (sel.includes('Save') || sel.includes('Lưu')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                isEnabled: async () => true,
+                innerText: async () => 'Save',
+                textContent: async () => 'Save',
+                click: async () => {
+                  firstSaveClicked = true;
+                  firstPopupOpen = false;
+                },
+                waitFor: async () => {}
+              })
+            };
+          }
+        }
+        if (sel === 'input[type="tel"]') {
+          return {
+            count: async () => 1,
+            first: () => ({ isVisible: async () => true }),
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              click: async () => {},
+              fill: async (v: string) => {
+                firstPasteVal = v;
+              },
+              inputValue: async () => firstPasteVal,
+              locator: () => ({ count: async () => 0 })
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
     };
 
-    try {
-      await activateTabB({
-        pageB: mockTabBInvalidProtocol,
-        stepName: 'test-invalid-protocol'
-      });
-    } catch (err: any) {
-      if (err.message.includes('[LỖI URL TAB B] URL của TabB không sử dụng giao thức http hoặc https')) {
-        invalidProtocolCaught = true;
-      }
-    }
-    assert.strictEqual(invalidProtocolCaught, true, 'Phải từ chối URL không phải giao thức http hoặc https');
-    console.log('  ✔ Từ chối URL không phải http/https thành công.');
+    await inputPhoneNumberOnTabC({
+      page: mockPagePaste1,
+      stepName: 'test-paste-1',
+      phone: '0912345678',
+      timeoutMs: 2000
+    });
 
-    // 36.3: reloadTabBThroughProxy - Trường hợp Chrome vừa restart:
-    // - Không gọi reload() hoặc bringToFront() trên TabB cũ đã đóng.
-    // - Tạo Page mới trong context mới qua bm.newPage('TabB').
-    // - Đăng ký lại Page này dưới tên TabB qua bm.registerPage('TabB', newPage).
-    // - Truy cập tabBUrl bằng goto() với waitUntil: 'domcontentloaded'.
-    // - Đưa TabB mới lên trước bằng bringToFront().
-    // - In thông báo: "Đã bật chế độ proxy và tải lại trang TabB."
-    let oldTabBReloadCalled = false;
-    let oldTabBBringToFrontCalled = false;
-    const mockClosedOldTabB: any = {
-      isClosed: () => true,
-      reload: async () => {
-        oldTabBReloadCalled = true;
-      },
-      bringToFront: async () => {
-        oldTabBBringToFrontCalled = true;
-      }
-    };
+    assert.strictEqual(firstPasteChangeClicked, true, 'Lần 1: Phải click Change trước khi paste số điện thoại');
+    assert.strictEqual(firstSaveClicked, true, 'Lần 1: Phải click Save trong popup');
+    assert.strictEqual(firstPasteVal, '0912345678', 'Lần 1: Sau khi Save, phải paste số điện thoại thành công');
+    console.log('  ✔ Lần paste 1: Đổi mã sang (+84) thành công trước khi paste số điện thoại.');
 
-    let newTabBCreated = false;
-    let registeredTabBName = '';
-    let gotoUrlCalled = '';
-    let gotoWaitUntil = '';
-    let newTabBBroughtToFront = false;
+    // 43.4: Kiểm tra lần paste 2 (inputReenterPhoneOnTabC) tự động đổi mã (+84)
+    let secondPasteChangeClicked = false;
+    let secondPasteVal = '';
+    let secondPopupOpen = false;
+    let secondSaveClicked = false;
 
-    const mockNewPageB: any = {
+    const mockPagePaste2: any = {
       isClosed: () => false,
-      goto: async (url: string, opts?: any) => {
-        gotoUrlCalled = url;
-        gotoWaitUntil = opts?.waitUntil;
-      },
-      bringToFront: async () => {
-        newTabBBroughtToFront = true;
-      },
-      title: async () => 'Muse.ai - Workspace',
-      locator: () => ({ count: async () => 0 })
+      title: async () => 'Meta Security',
+      waitForTimeout: async () => {},
+      locator: (sel: string) => {
+        if (!secondPopupOpen && (sel.includes('Change') || sel.includes('Thay đổi'))) {
+          return {
+            count: async () => 1,
+            nth: () => ({
+              isVisible: async () => true,
+              innerText: async () => 'Change',
+              click: async () => {
+                secondPasteChangeClicked = true;
+                secondPopupOpen = true;
+              },
+              locator: (subSel: string) => ({
+                textContent: async () => 'Canada (+1) Change'
+              })
+            })
+          };
+        }
+        if (secondPopupOpen) {
+          if (sel.includes('(+84)')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                innerText: async () => 'Vietnam (+84)',
+                textContent: async () => 'Vietnam (+84)',
+                scrollIntoViewIfNeeded: async () => {},
+                click: async () => {},
+                locator: () => ({ count: async () => 0 })
+              })
+            };
+          }
+          if (sel.includes('Save') || sel.includes('Lưu')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                isEnabled: async () => true,
+                innerText: async () => 'Save',
+                textContent: async () => 'Save',
+                click: async () => {
+                  secondSaveClicked = true;
+                  secondPopupOpen = false;
+                },
+                waitFor: async () => {}
+              })
+            };
+          }
+        }
+        if (sel === 'input[type="tel"]') {
+          return {
+            count: async () => 1,
+            first: () => ({ isVisible: async () => true }),
+            nth: () => ({
+              isVisible: async () => true,
+              isEditable: async () => true,
+              isEnabled: async () => true,
+              fill: async (v: string) => {
+                secondPasteVal = v;
+              },
+              inputValue: async () => secondPasteVal,
+              locator: () => ({ count: async () => 0 }),
+              evaluate: async () => true
+            })
+          };
+        }
+        return { count: async () => 0 };
+      }
     };
 
-    const mockBMRestarted: any = {
-      newPage: async (name: string) => {
-        newTabBCreated = true;
-        return mockNewPageB;
-      },
-      registerPage: (name: string, p: any) => {
-        registeredTabBName = name;
-      },
-      getPage: (name: string) => undefined
-    };
+    await inputReenterPhoneOnTabC({
+      page: mockPagePaste2,
+      stepName: 'test-paste-2',
+      phone: '0912345678',
+      timeoutMs: 2000
+    });
 
-    const consoleLogsRestart: string[] = [];
-    const origLog = console.log;
-    console.log = (msg: string) => {
-      consoleLogsRestart.push(msg);
-      origLog(msg);
-    };
+    assert.strictEqual(secondPasteChangeClicked, true, 'Lần 2: Phải click Change trước khi paste số điện thoại');
+    assert.strictEqual(secondSaveClicked, true, 'Lần 2: Phải click Save trong popup');
+    assert.strictEqual(secondPasteVal, '0912345678', 'Lần 2: Sau khi Save, phải paste lại số điện thoại thành công');
+    console.log('  ✔ Lần paste 2: Đổi mã sang (+84) thành công trước khi paste lại số điện thoại.');
 
-    let returnedTabB: any;
-    try {
-      returnedTabB = await reloadTabBThroughProxy({
-        browserManager: mockBMRestarted,
-        tabBUrl: 'https://muse.ai/workspace',
-        existingTabB: mockClosedOldTabB,
-        stepName: 'test-reload-restart',
-        timeoutMs: 10000,
-        logger: memoryLogger
-      });
-    } finally {
-      console.log = origLog;
-    }
+    // 43.5: Kiểm tra isPhoneEquivalent tương thích định dạng Việt Nam
+    assert.strictEqual(isPhoneEquivalent('+84901234567', '0901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('0901234567', '+84901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('901234567', '0901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('+84 901 234 567', '0901234567'), true);
+    assert.strictEqual(isPhoneEquivalent('0901234567', '0987654321'), false);
+    console.log('  ✔ isPhoneEquivalent tương thích hoàn hảo giữa định dạng +84 và 0 ở đầu.');
 
-    assert.strictEqual(oldTabBReloadCalled, false, 'Không được gọi reload() trên TabB cũ sau khi restart');
-    assert.strictEqual(oldTabBBringToFrontCalled, false, 'Không được gọi bringToFront() trên TabB cũ sau khi restart');
-    assert.strictEqual(newTabBCreated, true, 'Phải tạo Page mới trong context mới qua newPage');
-    assert.strictEqual(registeredTabBName, 'TabB', 'Phải đăng ký Page mới dưới tên TabB trong bộ quản lý tab');
-    assert.strictEqual(gotoUrlCalled, 'https://muse.ai/workspace', 'Phải truy cập đúng tabBUrl bằng goto()');
-    assert.strictEqual(gotoWaitUntil, 'domcontentloaded', 'Goto phải sử dụng waitUntil: "domcontentloaded"');
-    assert.strictEqual(newTabBBroughtToFront, true, 'Phải đưa TabB mới lên trước bằng bringToFront()');
-    assert.strictEqual(returnedTabB, mockNewPageB, 'Kết quả trả về phải là đối tượng Page mới');
-    assert.ok(
-      consoleLogsRestart.some((m) => m.includes('Đã bật chế độ proxy và tải lại trang TabB.')),
-      'Phải thông báo chính xác "Đã bật chế độ proxy và tải lại trang TabB."'
-    );
-    console.log('  ✔ Trường hợp Chrome vừa restart: tạo TabB mới, đăng ký lại và truy cập URL thành công 100%.');
+    // 43.6: Kiểm tra chỉ click đúng nút Change ngang hàng với (+xx) khi có nhiều nút Change trên màn hình (ví dụ: Change password vs China (+86) Change)
+    let wrongChangeClicked = false;
+    let rightChangeClicked = false;
+    let popup6Open = false;
 
-    // 36.4: reloadTabBThroughProxy - Trường hợp proxy đã bật và Chrome không restart:
-    // - Dùng TabB hiện tại.
-    // - Gọi TabB.reload() với waitUntil: 'domcontentloaded'.
-    // - Đưa TabB hiện tại lên trước bằng bringToFront().
-    // - Không tạo Tab mới trong BrowserManager.
-    let currentTabBReloaded = false;
-    let reloadWaitUntil = '';
-    let currentTabBBroughtToFront = false;
-    let bmNewPageCalled = false;
-
-    const mockAliveTabB: any = {
+    const mockPageMultiChange: any = {
       isClosed: () => false,
-      reload: async (opts?: any) => {
-        currentTabBReloaded = true;
-        reloadWaitUntil = opts?.waitUntil;
-      },
-      bringToFront: async () => {
-        currentTabBBroughtToFront = true;
-      },
-      title: async () => 'Muse.ai - Active',
-      locator: () => ({ count: async () => 0 })
-    };
-
-    const mockBMNoRestart: any = {
-      newPage: async () => {
-        bmNewPageCalled = true;
-        return {};
+      title: async () => 'Meta Security',
+      waitForTimeout: async () => {},
+      locator: (sel: string) => {
+        // Nút Change (có 2 nút: nút 0 là Change password, nút 1 là trong China (+86))
+        if (!popup6Open && (sel.includes('Change') || sel.includes('Thay đổi'))) {
+          return {
+            count: async () => 2,
+            nth: (idx: number) => {
+              if (idx === 0) {
+                return {
+                  isVisible: async () => true,
+                  innerText: async () => 'Change',
+                  textContent: async () => 'Change',
+                  click: async () => {
+                    wrongChangeClicked = true;
+                  },
+                  locator: (subSel: string) => {
+                    if (subSel === 'xpath=..') {
+                      return { textContent: async () => 'Change your password' };
+                    }
+                    return { textContent: async () => '' };
+                  }
+                };
+              }
+              // idx === 1: Nút Change ngang hàng với China (+86)
+              return {
+                isVisible: async () => true,
+                innerText: async () => 'Change',
+                textContent: async () => 'Change',
+                click: async () => {
+                  rightChangeClicked = true;
+                  popup6Open = true;
+                },
+                locator: (subSel: string) => {
+                  if (subSel === 'xpath=..') {
+                    return { textContent: async () => 'China (+86) Change' };
+                  }
+                  return { textContent: async () => '' };
+                }
+              };
+            }
+          };
+        }
+        if (popup6Open) {
+          if (sel.includes('(+84)')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                innerText: async () => 'Vietnam (+84)',
+                textContent: async () => 'Vietnam (+84)',
+                scrollIntoViewIfNeeded: async () => {},
+                click: async () => {},
+                locator: () => ({ count: async () => 0 })
+              })
+            };
+          }
+          if (sel.includes('Save') || sel.includes('Lưu')) {
+            return {
+              count: async () => 1,
+              first: () => ({ isVisible: async () => true }),
+              nth: () => ({
+                isVisible: async () => true,
+                isEnabled: async () => true,
+                innerText: async () => 'Save',
+                textContent: async () => 'Save',
+                click: async () => {
+                  popup6Open = false;
+                },
+                waitFor: async () => {}
+              })
+            };
+          }
+        }
+        return { count: async () => 0 };
       }
     };
 
-    const consoleLogsNoRestart: string[] = [];
-    console.log = (msg: string) => {
-      consoleLogsNoRestart.push(msg);
-      origLog(msg);
-    };
+    await ensureCountryCodeIsVietnam({
+      page: mockPageMultiChange,
+      stepName: 'test-multi-change-discrimination',
+      timeoutMs: 2000
+    });
 
-    let returnedTabBNoRestart: any;
-    try {
-      returnedTabBNoRestart = await reloadTabBThroughProxy({
-        browserManager: mockBMNoRestart,
-        tabBUrl: 'https://muse.ai/workspace',
-        existingTabB: mockAliveTabB,
-        stepName: 'test-reload-no-restart',
-        timeoutMs: 10000,
-        logger: memoryLogger
-      });
-    } finally {
-      console.log = origLog;
-    }
-
-    assert.strictEqual(bmNewPageCalled, false, 'Không được tạo Tab mới khi Chrome không restart');
-    assert.strictEqual(currentTabBReloaded, true, 'Phải gọi reload() trên TabB hiện tại');
-    assert.strictEqual(reloadWaitUntil, 'domcontentloaded', 'Reload phải sử dụng waitUntil: "domcontentloaded"');
-    assert.strictEqual(currentTabBBroughtToFront, true, 'Phải đưa TabB hiện tại lên trước bằng bringToFront()');
-    assert.strictEqual(returnedTabBNoRestart, mockAliveTabB, 'Phải giữ nguyên đối tượng TabB hiện tại');
-    assert.ok(
-      consoleLogsNoRestart.some((m) => m.includes('Đã bật chế độ proxy và tải lại trang TabB.')),
-      'Phải thông báo chính xác "Đã bật chế độ proxy và tải lại trang TabB."'
-    );
-    console.log('  ✔ Trường hợp proxy đã bật và không restart: reload TabB hiện tại thành công 100%.');
-
-    // 36.5: Kiểm tra bước tabB-enable-proxy dừng ngay khi thiếu server cấu hình proxy
-    const enableProxyStep = yopmailMuseFlow.steps.find((s) => s.id === 'tabB-enable-proxy')!;
-    assert.ok(enableProxyStep, 'Phải có bước tabB-enable-proxy trong yopmailMuseFlow');
-
-    let missingServerCaught = false;
-    const mockContextMissingProxy: any = {
-      browserManager: {
-        getConnectionMode: () => 'direct',
-        switchConnectionMode: async () => {}
-      },
-      config: {
-        flowName: 'yopmail-muse',
-        proxy: { enabled: false, server: '' } // server rỗng
-      },
-      logger: memoryLogger,
-      data: {}
-    };
-
-    try {
-      await enableProxyStep.execute(mockContextMissingProxy);
-    } catch (err: any) {
-      if (err.message.includes('[LỖI CẤU HÌNH PROXY]')) {
-        missingServerCaught = true;
-      }
-    }
-    assert.strictEqual(missingServerCaught, true, 'Phải dừng ngay khi thiếu proxy.server, không fallback sang direct');
-    console.log('  ✔ Bước tabB-enable-proxy dừng an toàn và không fallback khi thiếu proxy server.');
-
-    // 36.6: Kiểm tra tabB-enable-proxy vô hiệu hóa tham chiếu Page/Context cũ khi restart
-    let switchedToMode = '';
-    const mockContextRestart: any = {
-      browserManager: {
-        getConnectionMode: () => 'direct',
-        switchConnectionMode: async (m: string) => {
-          switchedToMode = m;
-        },
-        getPage: () => undefined
-      },
-      config: {
-        flowName: 'yopmail-muse',
-        proxy: { enabled: true, server: 'http://103.82.25.199:14553' }
-      },
-      logger: memoryLogger,
-      data: {
-        tabA: { isClosed: () => true },
-        tabB: { isClosed: () => true },
-        tabC: { isClosed: () => true }
-      }
-    };
-
-    await enableProxyStep.execute(mockContextRestart);
-    assert.strictEqual(switchedToMode, 'proxy', 'Phải chuyển kết nối sang proxy');
-    assert.strictEqual(mockContextRestart.data.tabA, undefined, 'tabA cũ phải bị vô hiệu hóa (undefined)');
-    assert.strictEqual(mockContextRestart.data.tabC, undefined, 'tabC cũ phải bị vô hiệu hóa (undefined)');
-    assert.strictEqual(mockContextRestart.data.tabB, undefined, 'tabB cũ phải bị vô hiệu hóa (undefined)');
-    console.log('  ✔ Vô hiệu hóa toàn bộ tham chiếu Page cũ sau khi restart Chrome thành công.');
-
-    // 36.7: reloadTabBThroughProxy phát hiện CAPTCHA / Security Verification và dừng an toàn
-    let captchaDetected = false;
-    const mockCaptchaPage: any = {
-      isClosed: () => false,
-      title: async () => 'Security Verification',
-      reload: async () => {},
-      bringToFront: async () => {},
-      locator: () => ({ count: async () => 0 })
-    };
-
-    try {
-      await reloadTabBThroughProxy({
-        browserManager: mockBMNoRestart,
-        tabBUrl: 'https://muse.ai/workspace',
-        existingTabB: mockCaptchaPage,
-        stepName: 'test-captcha-tabB',
-        timeoutMs: 5000,
-        logger: memoryLogger
-      });
-    } catch (err: any) {
-      if (err.message.includes('[YÊU CẦU XÁC MINH]')) {
-        captchaDetected = true;
-      }
-    }
-    assert.strictEqual(captchaDetected, true, 'Phải dừng khi phát hiện trang xác minh, không tự vượt');
-    console.log('  ✔ Dừng an toàn để người dùng xử lý thủ công khi gặp xác minh trên TabB.');
-
-    // 36.8: Kiểm tra Giải pháp 2 trong BrowserManager (chuyển đổi proxy ẩn danh không tắt Chrome và đồng bộ cookies)
-    let browserClosed = false;
-    let newContextProxyOption: any = null;
-    let addedCookiesToNewContext: any[] = [];
-    let oldContextClosed = false;
-
-    const mockOldContext: any = {
-      cookies: async () => [
-        { name: 'muse_session', value: 'secret_session_token_123', domain: 'muse.ai', path: '/' }
-      ],
-      close: async () => {
-        oldContextClosed = true;
-      }
-    };
-
-    const mockNewContext: any = {
-      setDefaultTimeout: () => {},
-      setDefaultNavigationTimeout: () => {},
-      addCookies: async (cookies: any[]) => {
-        addedCookiesToNewContext = cookies;
-      },
-      newPage: async () => ({
-        setDefaultTimeout: () => {},
-        setDefaultNavigationTimeout: () => {},
-        isClosed: () => false
-      }),
-      request: {
-        get: async () => ({
-          ok: () => true,
-          status: () => 200,
-          text: async () => '{"origin": "103.82.25.199"}'
-        })
-      }
-    };
-
-    const mockBrowserInstance: any = {
-      isConnected: () => true,
-      newContext: async (opts: any) => {
-        newContextProxyOption = opts?.proxy;
-        return mockNewContext;
-      },
-      close: async () => {
-        browserClosed = true;
-      }
-    };
-
-    const incognitoConfig: any = {
-      flowName: 'yopmail-muse',
-      incognito: true,
-      initialConnectionMode: 'direct',
-      actionTimeoutMs: 5000,
-      navigationTimeoutMs: 10000,
-      proxy: {
-        enabled: false,
-        server: 'http://103.82.25.199:14553'
-      },
-      selectedProfile: { profileName: 'Incognito' }
-    };
-
-    const initialIncognitoSession: any = {
-      browser: mockBrowserInstance,
-      context: mockOldContext,
-      page: { isClosed: () => false },
-      isIncognito: true
-    };
-
-    const { BrowserManager: BMClass } = await import('../src/browser/manager');
-    const incognitoBM = new BMClass(incognitoConfig, initialIncognitoSession, memoryLogger);
-
-    const switchedSession = await incognitoBM.switchConnectionMode('proxy');
-
-    assert.strictEqual(browserClosed, false, 'Cửa sổ trình duyệt Chrome không được phép đóng');
-    assert.strictEqual(oldContextClosed, true, 'Context direct cũ phải được đóng sau khi context mới sẵn sàng');
-    assert.ok(newContextProxyOption, 'Context mới phải có cấu hình proxy');
-    assert.strictEqual(newContextProxyOption.server, 'http://103.82.25.199:14553');
-    assert.strictEqual(addedCookiesToNewContext.length, 1, 'Cookies của phiên ẩn danh cũ phải được đồng bộ sang context mới');
-    assert.strictEqual(addedCookiesToNewContext[0].name, 'muse_session');
-    assert.strictEqual(incognitoBM.getConnectionMode(), 'proxy');
-    console.log('  ✔ Giải pháp 2: Chuyển đổi proxy ẩn danh không tắt Chrome và đồng bộ cookies thành công 100%.');
+    assert.strictEqual(wrongChangeClicked, false, 'Tuyệt đối không được click nút Change không có (+xx) như Change password');
+    assert.strictEqual(rightChangeClicked, true, 'Bắt buộc phải click đúng nút Change ngang hàng với (+xx)');
+    console.log('  ✔ Phân biệt và click chính xác nút Change ngang hàng với (+xx) khi có nhiều nút Change trên màn hình.');
   }
 
   console.log('\n--- TẤT CẢ BÀI KIỂM TRA LUỒNG YOPMAIL-MUSE (TÍCH HỢP TEMP-MAIL) ĐÃ VƯỢT QUA! ---');

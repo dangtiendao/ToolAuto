@@ -8,6 +8,7 @@ import {
   getProjectRoot,
   isForbiddenChromeUserDataDir
 } from '../src/config';
+import { buildWindowArgs } from '../src/browser/common';
 
 console.log('--- BẮT ĐẦU KIỂM TRA MODULE CẤU HÌNH (PROFILE THEO TÊN) ---\n');
 
@@ -506,6 +507,172 @@ console.log('\n12. Kiểm tra cấu hình incognito:');
   }
 
   console.log('  ✔ Kiểm tra cấu hình incognito và formatSafeConfig thành công.');
+}
+
+// ==========================================
+// Test 13: Kiểm tra cấu hình proxy tự động kéo từ API
+// ==========================================
+console.log('\n13. Kiểm tra cấu hình proxy tự động kéo từ API:');
+{
+  const rawApiProxy = {
+    startUrl: 'https://example.com',
+    incognito: true,
+    initialConnectionMode: 'proxy',
+    flowName: 'yopmail-muse',
+    proxy: {
+      enabled: true
+    }
+  };
+
+  const res = validateConfig(rawApiProxy, projectRoot);
+  assert.strictEqual(res.valid, true, 'Cấu hình proxy tự động từ API phải hợp lệ');
+  assert.ok(res.config);
+  assert.strictEqual(res.config.initialConnectionMode, 'proxy');
+  assert.strictEqual(res.config.proxy.enabled, true);
+  console.log('  ✔ Kiểm tra cấu hình proxy tự động kéo từ API thành công 100%.');
+}
+
+// ==========================================
+// Test 14: Kiểm tra cấu hình pageLoadMaxRetries và pageLoadRetryDelayMs
+// ==========================================
+console.log('\n14. Kiểm tra cấu hình retry khi tải trang (load trang lỗi do proxy):');
+{
+  // 14.1: Giá trị mặc định
+  const defaultCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true },
+    projectRoot
+  );
+  assert.strictEqual(defaultCfg.valid, true);
+  assert.strictEqual(defaultCfg.config?.pageLoadMaxRetries, 3, 'Mặc định pageLoadMaxRetries phải là 3');
+  assert.strictEqual(defaultCfg.config?.pageLoadRetryDelayMs, 3000, 'Mặc định pageLoadRetryDelayMs phải là 3000 (3s)');
+
+  // 14.2: Tùy chỉnh hợp lệ
+  const customCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, pageLoadMaxRetries: 5, pageLoadRetryDelayMs: 4000 },
+    projectRoot
+  );
+  assert.strictEqual(customCfg.valid, true);
+  assert.strictEqual(customCfg.config?.pageLoadMaxRetries, 5);
+  assert.strictEqual(customCfg.config?.pageLoadRetryDelayMs, 4000);
+
+  // 14.3: Giá trị không hợp lệ (số âm hoặc không phải số nguyên)
+  const invalidCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, pageLoadMaxRetries: -1, pageLoadRetryDelayMs: 2.5 },
+    projectRoot
+  );
+  assert.strictEqual(invalidCfg.valid, false);
+  assert.ok(invalidCfg.errors.some((e) => e.includes('"pageLoadMaxRetries" phải là số nguyên không âm')));
+  assert.ok(invalidCfg.errors.some((e) => e.includes('"pageLoadRetryDelayMs" phải là số nguyên không âm')));
+
+  // 14.4: formatSafeConfig có chứa pageLoadMaxRetries và pageLoadRetryDelayMs
+  if (defaultCfg.config) {
+    const safe = formatSafeConfig(defaultCfg.config);
+    assert.strictEqual(safe.pageLoadMaxRetries, 3);
+    assert.strictEqual(safe.pageLoadRetryDelayMs, 3000);
+  }
+
+  console.log('  ✔ Kiểm tra cấu hình pageLoadMaxRetries (3) và pageLoadRetryDelayMs (3s) thành công.');
+}
+
+// ==========================================
+// Test 15: Kiểm tra proxy bật với server rỗng khi kéo từ API (yopmail-muse)
+// ==========================================
+console.log('\n15. Kiểm tra proxy bật với server rỗng khi kéo từ API (yopmail-muse):');
+{
+  const apiProxyCfg = validateConfig(
+    {
+      startUrl: 'https://example.com',
+      incognito: true,
+      flowName: 'yopmail-muse',
+      proxy: {
+        enabled: true,
+        server: '',
+        username: '',
+        password: '',
+        bypass: ''
+      }
+    },
+    projectRoot
+  );
+  assert.strictEqual(apiProxyCfg.valid, true, `apiProxyCfg errors: ${apiProxyCfg.errors.join(', ')}`);
+  assert.strictEqual(apiProxyCfg.config?.proxy.enabled, true);
+  assert.strictEqual(apiProxyCfg.config?.proxy.server, '');
+  console.log('  ✔ Cho phép proxy.server rỗng khi luồng yopmail-muse tự động kéo proxy từ API.');
+}
+
+// ==========================================
+// Test 16: Kiểm tra cấu hình windowSize và windowPosition
+// ==========================================
+console.log('\n16. Kiểm tra cấu hình windowSize và windowPosition (maximized, width x height, buildWindowArgs):');
+{
+  // 16.1: windowSize là chuỗi "maximized"
+  const maxCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowSize: 'maximized' },
+    projectRoot
+  );
+  assert.strictEqual(maxCfg.valid, true);
+  assert.strictEqual(maxCfg.config?.windowSize, 'maximized');
+  assert.deepStrictEqual(buildWindowArgs(maxCfg.config?.windowSize), ['--start-maximized']);
+
+  // 16.2: windowSize là chuỗi "1280,720" hoặc "1280x720"
+  const commaCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowSize: '1280,720' },
+    projectRoot
+  );
+  assert.strictEqual(commaCfg.valid, true);
+  assert.deepStrictEqual(commaCfg.config?.windowSize, { width: 1280, height: 720 });
+  assert.deepStrictEqual(buildWindowArgs(commaCfg.config?.windowSize), ['--window-size=1280,720']);
+
+  const xCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowSize: '1920x1080' },
+    projectRoot
+  );
+  assert.strictEqual(xCfg.valid, true);
+  assert.deepStrictEqual(xCfg.config?.windowSize, { width: 1920, height: 1080 });
+
+  // 16.3: windowSize là object { width: 1024, height: 768 } kèm windowPosition { x: 100, y: 50 }
+  const objCfg = validateConfig(
+    {
+      startUrl: 'https://example.com',
+      incognito: true,
+      windowSize: { width: 1024, height: 768 },
+      windowPosition: { x: 100, y: 50 }
+    },
+    projectRoot
+  );
+  assert.strictEqual(objCfg.valid, true);
+  assert.deepStrictEqual(objCfg.config?.windowSize, { width: 1024, height: 768 });
+  assert.deepStrictEqual(objCfg.config?.windowPosition, { x: 100, y: 50 });
+  assert.deepStrictEqual(
+    buildWindowArgs(objCfg.config?.windowSize, objCfg.config?.windowPosition),
+    ['--window-size=1024,768', '--window-position=100,50']
+  );
+
+  // 16.4: windowPosition dạng chuỗi "0,0"
+  const posStrCfg = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowPosition: '0,0' },
+    projectRoot
+  );
+  assert.strictEqual(posStrCfg.valid, true);
+  assert.deepStrictEqual(posStrCfg.config?.windowPosition, { x: 0, y: 0 });
+
+  // 16.5: Lỗi khi windowSize không hợp lệ
+  const badSize = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowSize: 'invalid_size' },
+    projectRoot
+  );
+  assert.strictEqual(badSize.valid, false);
+  assert.ok(badSize.errors.some((e) => e.includes('windowSize')));
+
+  // 16.6: Lỗi khi kích thước quá nhỏ (< 300)
+  const tinySize = validateConfig(
+    { startUrl: 'https://example.com', incognito: true, windowSize: { width: 100, height: 200 } },
+    projectRoot
+  );
+  assert.strictEqual(tinySize.valid, false);
+  assert.ok(tinySize.errors.some((e) => e.includes('windowSize')));
+
+  console.log('  ✔ Thẩm định và tạo đối số dòng lệnh windowSize / windowPosition thành công 100%.');
 }
 
 console.log('\n--- TẤT CẢ CÁC BÀI KIỂM TRA CẤU HÌNH ĐÃ VƯỢT QUA THÀNH CÔNG! ---');
